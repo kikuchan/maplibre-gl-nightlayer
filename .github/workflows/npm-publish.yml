@@ -1,0 +1,25 @@
+name: Publish Package
+
+on:
+  push:
+    tags:
+      - v**
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 23
+          registry-url: https://registry.npmjs.org/
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - run: pnpm i --frozen-lockfile --strict-peer-dependencies
+      - run: pnpm build
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
+

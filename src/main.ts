@@ -17,20 +17,20 @@ type Color = [number, number, number];
  */
 type Options = {
   /**
-   * Date.
+   * Date for the shadow.
    * If null, the current date is used.
    */
   date?: Date | null;
 
   /**
-   * Opacity.
+   * Opacity of the shadow.
    * 0.0 means fully transparent, 1.0 means fully opaque
    */
   opacity?: number;
 
   /**
-   * RGB color.
-   * Each value is in the range [0, 255].
+   * Color of the shadow.
+   * Each value should be in the range [0, 255].
    */
   color?: Color;
 
@@ -74,7 +74,7 @@ export class NightLayer implements CustomLayerInterface {
 
   /**
    * Create a new NightLayer instance. Intended to be passed to `map.addLayer`.
-   * @param opts Options.
+   * @param opts The options.
    */
   constructor(opts: Options = {}) {
     this.#date = opts.date ?? null;
@@ -88,7 +88,7 @@ export class NightLayer implements CustomLayerInterface {
 
   /**
    * Get the subsolar point (longitude and latitude) at the given date.
-   * @param date Date. If null, the current date is used.
+   * @param date If null, the current date is used.
    */
   getSubsolarPoint(date: Date) {
     // based on https://en.wikipedia.org/wiki/Equation_of_time#Alternative_calculation
@@ -116,16 +116,16 @@ export class NightLayer implements CustomLayerInterface {
   }
 
   /**
-   * Get the date of the night layer.
-   * @returns Date. If null, the current date is used.
+   * Get the date for the shadow.
+   * @returns The date. If null, the current date is used.
    */
   getDate() {
     return this.#date;
   }
 
   /**
-   * Set the date of the night layer.
-   * @param date Date. If null, the current date is used.
+   * Set the date for the shadow.
+   * @param date If null, the current date is used.
    */
   setDate(date: Date | null) {
     this.#date = date;
@@ -133,42 +133,42 @@ export class NightLayer implements CustomLayerInterface {
   }
 
   /**
-   * Get the opacity of the night layer.
-   * @returns Opacity. 0.0 means fully transparent, 1.0 means fully opaque.
+   * Get the opacity of the shadow.
+   * @returns The opacity. 0.0 means fully transparent, 1.0 means fully opaque.
    */
   getOpacity() {
     return this.#opacity;
   }
 
   /**
-   * Set the opacity of the night layer.
-   * @param v Opacity. 0.0 means fully transparent, 1.0 means fully opaque.
+   * Set the opacity of the shadow.
+   * @param opacity 0.0 means fully transparent, 1.0 means fully opaque.
    */
-  setOpacity(v: number) {
-    this.#opacity = v;
+  setOpacity(opacity: number) {
+    this.#opacity = opacity;
     this.#map?.triggerRepaint();
   }
 
   /**
-   * Get the color of the night layer.
-   * @returns RGB color. Each value is in the range [0, 255].
+   * Get the color of the shadow.
+   * @returns The color. Each value is in the range [0, 255].
    */
   getColor() {
     return this.#color;
   }
 
   /**
-   * Set the color of the night layer.
-   * @param v RGB color. Each value should be in the range [0, 255].
+   * Set the color of the shadow.
+   * @param color Each value should be in the range [0, 255].
    */
-  setColor(v: Color) {
-    this.#color = v;
+  setColor(color: Color) {
+    this.#color = color;
     this.#map?.triggerRepaint();
   }
 
   /**
    * Get the number of twilight steps.
-   * @returns 0 means no steps (gradation), 1 means one step (day/night), etc.
+   * @returns The steps. 0 means no steps (gradation), 1 means one step (day/night), etc.
    */
   getTwilightSteps() {
     return this.#twilightSteps;
@@ -176,16 +176,16 @@ export class NightLayer implements CustomLayerInterface {
 
   /**
    * Set the number of twilight steps.
-   * @param v 0 means no steps (gradation), 1 means one step (day/night), etc.
+   * @param steps 0 means no steps (gradation), 1 means one step (day/night), etc.
    */
-  setTwilightSteps(v: number) {
-    this.#twilightSteps = v;
+  setTwilightSteps(steps: number) {
+    this.#twilightSteps = steps;
     this.#map?.triggerRepaint();
   }
 
   /**
    * Get the angle for each twilight step.
-   * @returns angle in degrees.
+   * @returns The angle in degrees.
    */
   getTwilightStepAngle() {
     return this.#twilightStepAngle;
@@ -193,16 +193,16 @@ export class NightLayer implements CustomLayerInterface {
 
   /**
    * Set the angle for each twilight step.
-   * @param v angle in degrees.
+   * @param angle in degrees.
    */
-  setTwilightStepAngle(v: number) {
-    this.#twilightStepAngle = v;
+  setTwilightStepAngle(angle: number) {
+    this.#twilightStepAngle = angle;
     this.#map?.triggerRepaint();
   }
 
   /**
    * Get the attenuation factor for each twilight step.
-   * @returns 0.0 means no attenuation, 1.0 means full attenuation.
+   * @returns The attenuation. 0.0 means no attenuation, 1.0 means full attenuation.
    */
   getTwilightAttenuation() {
     return this.#twilightAttenuation;
@@ -210,10 +210,10 @@ export class NightLayer implements CustomLayerInterface {
 
   /**
    * Set the attenuation factor for each twilight step.
-   * @param v 0.0 means no attenuation, 1.0 means full attenuation.
+   * @param attenuation 0.0 means no attenuation, 1.0 means full attenuation.
    */
-  setTwilightAttenuation(v: number) {
-    this.#twilightAttenuation = v;
+  setTwilightAttenuation(attenuation: number) {
+    this.#twilightAttenuation = attenuation;
     this.#map?.triggerRepaint();
   }
 

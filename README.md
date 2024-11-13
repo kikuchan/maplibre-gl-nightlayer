@@ -25,8 +25,8 @@ map.on('load', () => {
 type Color = [number, number, number];
 
 type Options = {
-    opacity?: number;
     date?: Date | null;
+    opacity?: number;
     color?: Color;
     twilightSteps?: number;
     twilightStepAngle?: number;
@@ -43,6 +43,9 @@ class NightLayer implements CustomLayerInterface {
 
     getDate(): Date | null;
     setDate(date: Date | null): void;
+
+    getOpacity(): number;
+    setOpacity(v: number): void;
 
     getColor(): Color;
     setColor(v: Color): void;

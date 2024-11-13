@@ -13,8 +13,8 @@ function degrees(rad: number) {
 type Color = [number, number, number];
 
 type Options = {
-  opacity?: number;
   date?: Date | null;
+  opacity?: number;
   color?: Color;
 
   twilightSteps?: number;
@@ -22,6 +22,9 @@ type Options = {
   twilightAttenuation?: number;
 };
 
+/**
+ * A custom Maplibre GL JS layer that renders the night side of the Earth.
+ */
 export class NightLayer implements CustomLayerInterface {
   id = 'nightlayer';
   type = 'custom' as const;
@@ -39,6 +42,10 @@ export class NightLayer implements CustomLayerInterface {
   #map?: MaplibreMap;
   #arrayBuffer?: WebGLBuffer;
 
+  /**
+   * Create a new NightLayer instance. Intended to be passed to `map.addLayer`.
+   * @param opts Options.
+   */
   constructor(opts: Options = {}) {
     this.#date = opts.date ?? null;
     this.#opacity = opts.opacity ?? 0.5;
@@ -49,6 +56,10 @@ export class NightLayer implements CustomLayerInterface {
     this.#twilightAttenuation = opts.twilightAttenuation ?? 0.5;
   }
 
+  /**
+   * Get the subsolar point (longitude and latitude) at the given date.
+   * @param date Date. If null, the current date is used.
+   */
   getSubsolarPoint(date: Date) {
     // based on https://en.wikipedia.org/wiki/Equation_of_time#Alternative_calculation
     const D = (date.getTime() - Date.UTC(date.getUTCFullYear(), 0, 0)) / 86400000;
@@ -74,44 +85,106 @@ export class NightLayer implements CustomLayerInterface {
     };
   }
 
+  /**
+   * Get the date of the night layer.
+   * @returns Date. If null, the current date is used.
+   */
   getDate() {
     return this.#date;
   }
 
+  /**
+   * Set the date of the night layer.
+   * @param date Date. If null, the current date is used.
+   */
   setDate(date: Date | null) {
     this.#date = date;
+    this.#map?.triggerRepaint();
   }
 
+  /**
+   * Get the opacity of the night layer.
+   * @returns Opacity. 0.0 means fully transparent, 1.0 means fully opaque.
+   */
+  getOpacity() {
+    return this.#opacity;
+  }
+
+  /**
+   * Set the opacity of the night layer.
+   * @param v Opacity. 0.0 means fully transparent, 1.0 means fully opaque.
+   */
+  setOpacity(v: number) {
+    this.#opacity = v;
+    this.#map?.triggerRepaint();
+  }
+
+  /**
+   * Get the color of the night layer.
+   * @returns RGB color. Each value is in the range [0, 255].
+   */
   getColor() {
     return this.#color;
   }
 
+  /**
+   * Set the color of the night layer.
+   * @param v RGB color. Each value should be in the range [0, 255].
+   */
   setColor(v: Color) {
     this.#color = v;
+    this.#map?.triggerRepaint();
   }
 
+  /**
+   * Get the number of twilight steps.
+   * @returns 0 means no steps (gradation), 1 means one step (day/night), etc.
+   */
   getTwilightSteps() {
     return this.#twilightSteps;
   }
 
+  /**
+   * Set the number of twilight steps.
+   * @param v 0 means no steps (gradation), 1 means one step (day/night), etc.
+   */
   setTwilightSteps(v: number) {
     this.#twilightSteps = v;
+    this.#map?.triggerRepaint();
   }
 
+  /**
+   * Get the angle for each twilight step.
+   * @returns angle in degrees.
+   */
   getTwilightStepAngle() {
     return this.#twilightStepAngle;
   }
 
+  /**
+   * Set the angle for each twilight step.
+   * @param v angle in degrees.
+   */
   setTwilightStepAngle(v: number) {
     this.#twilightStepAngle = v;
+    this.#map?.triggerRepaint();
   }
 
+  /**
+   * Get the attenuation factor for each twilight step.
+   * @returns 0.0 means no attenuation, 1.0 means full attenuation.
+   */
   getTwilightAttenuation() {
     return this.#twilightAttenuation;
   }
 
+  /**
+   * Set the attenuation factor for each twilight step.
+   * @param v 0.0 means no attenuation, 1.0 means full attenuation.
+   */
   setTwilightAttenuation(v: number) {
     this.#twilightAttenuation = v;
+    this.#map?.triggerRepaint();
   }
 
   onAdd(map: MaplibreMap, gl: WebGLRenderingContext) {
@@ -195,6 +268,12 @@ export class NightLayer implements CustomLayerInterface {
     this.#arrayBuffer = gl.createBuffer()!;
 
     this.#map = map;
+  }
+
+  onRemove() {
+    this.#map = undefined;
+    this.#arrayBuffer = undefined;
+    this.#program = undefined;
   }
 
   render(gl: WebGLRenderingContext, matrix: mat4) {

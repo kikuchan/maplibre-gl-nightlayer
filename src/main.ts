@@ -170,7 +170,7 @@ export class NightLayer implements CustomLayerInterface {
         if (twilightSteps > 0.) {
           twilightLevel = ceil(clamp(twilightLevel, 0., twilightSteps));
         }
-        float brightness = clamp(pow(att, twilightLevel), 0., 1.);
+        float brightness = clamp(pow(clamp(1. - att, 0., 1.), twilightLevel), 0., 1.);
         float darkness = (1. - brightness);
 
         gl_FragColor = vec4(u_color / 255., 1.0) * darkness * u_opacity;

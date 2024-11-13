@@ -28,6 +28,7 @@
     "terminator"
   ],
   "author": "kikuchan98@gmail.com",
+  "homepage": "https://github.com/kikuchan/maplibre-gl-nightlayer#readme",
   "license": "MIT",
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

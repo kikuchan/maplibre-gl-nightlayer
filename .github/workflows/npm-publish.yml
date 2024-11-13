@@ -1,4 +1,4 @@
-name: Publish Package
+name: Build and Release
 
 on:
   push:
@@ -6,20 +6,43 @@ on:
       - v**
 
 jobs:
-  publish-npm:
+  build-and-release:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set Tag Name
+        id: set_tag
+        run: echo "tag_name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
       - uses: actions/setup-node@v3
         with:
           node-version: 23
           registry-url: https://registry.npmjs.org/
+
       - uses: pnpm/action-setup@v2
         with:
           version: 8
+
       - run: pnpm i --frozen-lockfile --strict-peer-dependencies
       - run: pnpm build
+
       - run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
 
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.set_tag.outputs.tag_name }}
+          release_name: ${{ steps.set_tag.outputs.tag_name }}
+          draft: false
+          prerelease: false

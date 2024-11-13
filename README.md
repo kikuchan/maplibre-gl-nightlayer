@@ -45,19 +45,19 @@ class NightLayer implements CustomLayerInterface {
     setDate(date: Date | null): void;
 
     getOpacity(): number;
-    setOpacity(v: number): void;
+    setOpacity(opacity: number): void;
 
     getColor(): Color;
-    setColor(v: Color): void;
+    setColor(color: Color): void;
 
     getTwilightSteps(): number;
-    setTwilightSteps(v: number): void;
+    setTwilightSteps(steps: number): void;
 
     getTwilightStepAngle(): number;
-    setTwilightStepAngle(v: number): void;
+    setTwilightStepAngle(angle: number): void;
 
     getTwilightAttenuation(): number;
-    setTwilightAttenuation(v: number): void;
+    setTwilightAttenuation(attenuation: number): void;
 
       :
 }

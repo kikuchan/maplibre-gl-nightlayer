@@ -1,6 +1,6 @@
 {
   "name": "maplibre-gl-nightlayer",
-  "version": "1.0.0-alpha.4",
+  "version": "1.0.0-alpha.5",
   "description": "A Night Layer for MapLibre GL JS",
   "type": "module",
   "main": "dist/main.js",

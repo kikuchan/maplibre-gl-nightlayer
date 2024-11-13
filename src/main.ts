@@ -14,21 +14,41 @@ type Color = [number, number, number];
 
 /**
  * Options for the NightLayer.
- *
- * @property date Date. If null, the current date is used.
- * @property opacity Opacity. 0.0 means fully transparent, 1.0 means fully opaque.
- * @property color RGB color. Each value should be in the range [0, 255].
- * @property twilightSteps Number of twilight steps. 0 means no steps (gradation), 1 means one step (day/night), etc.
- * @property twilightStepAngle Angle in degrees for each twilight step.
- * @property twilightAttenuation Attenuation factor for each twilight step. 0.0 means no attenuation, 1.0 means full attenuation.
  */
 type Options = {
+  /**
+   * Date.
+   * If null, the current date is used.
+   */
   date?: Date | null;
+
+  /**
+   * Opacity.
+   * 0.0 means fully transparent, 1.0 means fully opaque
+   */
   opacity?: number;
+
+  /**
+   * RGB color.
+   * Each value is in the range [0, 255].
+   */
   color?: Color;
 
+  /**
+   * Number of twilight steps.
+   * 0 means no steps (gradation), 1 means one step (day/night), etc.
+   */
   twilightSteps?: number;
+
+  /**
+   * Angle for each twilight step in degrees.
+   */
   twilightStepAngle?: number;
+
+  /**
+   * Attenuation factor for each twilight step.
+   * 0.0 means no attenuation, 1.0 means full attenuation
+   */
   twilightAttenuation?: number;
 };
 

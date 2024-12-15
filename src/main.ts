@@ -263,8 +263,8 @@ ${
 }
 
       void main() {
-        gl_Position = projectTile(a_position / 8192.); // scale to 0.0 - 1.0
-        v_position = a_position / 8192.;
+        gl_Position = projectTile(a_position);
+        v_position = a_position;
       }
 `;
 
@@ -359,10 +359,10 @@ ${
         },
         '16bit',
       );
+
+      meshBuffers.vertices = new Float32Array(new Int16Array(meshBuffers.vertices)).map(x => x / 8192.0).buffer;
     } else {
-      const vertices = new Int16Array([xmin, 0, xmax, 0, xmin, 1, xmin, 1, xmax, 0, xmax, 1]).map(
-        (x) => x * 8192,
-      ).buffer;
+      const vertices = new Float32Array([xmin, 0, xmax, 0, xmin, 1, xmin, 1, xmax, 0, xmax, 1]).buffer;
 
       meshBuffers = {
         vertices,
@@ -454,7 +454,7 @@ ${
 
     const index = gl.getAttribLocation(program, 'a_position');
     gl.enableVertexAttribArray(index);
-    gl.vertexAttribPointer(index, 2, gl.SHORT, false, 0, 0);
+    gl.vertexAttribPointer(index, 2, gl.FLOAT, false, 0, 0);
 
     gl.drawElements(gl.TRIANGLES, this.#indices!, gl.UNSIGNED_SHORT, 0);
   }

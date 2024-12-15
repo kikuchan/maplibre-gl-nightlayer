@@ -221,54 +221,6 @@ export class NightLayer implements CustomLayerInterface {
     this.#map?.triggerRepaint();
   }
 
-  #updateModel(gl: WebGLRenderingContext | WebGL2RenderingContext) {
-    if (!this.#map) return;
-    if (!this.#vbo) return;
-    if (!this.#ibo) return;
-
-    const [w, e] = this.#map.getBounds().toArray();
-    const xmin = Math.floor(MercatorCoordinate.fromLngLat(w).x);
-    const xmax = Math.ceil(MercatorCoordinate.fromLngLat(e).x);
-
-    const modelSignature = this.#map.style?.projection?.name === 'globe' ? 'globe' : [xmin, xmax].join(':');
-    if (modelSignature === this.#modelSignature) return;
-
-    let meshBuffers: TileMesh;
-    if (modelSignature === 'globe') {
-      // model for globe projection
-      meshBuffers = createTileMesh(
-        {
-          granularity: 100,
-          generateBorders: false,
-          extendToNorthPole: true,
-          extendToSouthPole: true,
-        },
-        '16bit',
-      );
-    } else {
-      const vertices = new Int16Array([xmin, 0, xmax, 0, xmin, 1, xmin, 1, xmax, 0, xmax, 1]).map(
-        (x) => x * 8192,
-      ).buffer;
-
-      meshBuffers = {
-        vertices,
-        indices: new Uint16Array([0, 1, 2, 3, 4, 5]).buffer,
-        uses32bitIndices: false,
-      };
-    }
-
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.#vbo);
-    gl.bufferData(gl.ARRAY_BUFFER, meshBuffers.vertices, gl.DYNAMIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, null);
-
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.#ibo);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, meshBuffers.indices, gl.DYNAMIC_DRAW);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
-
-    this.#indices = meshBuffers.indices.byteLength / 2;
-    this.#modelSignature = modelSignature;
-  }
-
   onAdd(map: MaplibreMap, gl: WebGLRenderingContext | WebGL2RenderingContext) {
     this.#programCache = new Map();
     this.#vbo = gl.createBuffer()!;
@@ -381,6 +333,54 @@ ${
     gl.linkProgram(program);
 
     return program;
+  }
+
+  #updateModel(gl: WebGLRenderingContext | WebGL2RenderingContext) {
+    if (!this.#map) return;
+    if (!this.#vbo) return;
+    if (!this.#ibo) return;
+
+    const [w, e] = this.#map.getBounds().toArray();
+    const xmin = Math.floor(MercatorCoordinate.fromLngLat(w).x);
+    const xmax = Math.ceil(MercatorCoordinate.fromLngLat(e).x);
+
+    const modelSignature = this.#map.style?.projection?.name === 'globe' ? 'globe' : [xmin, xmax].join(':');
+    if (modelSignature === this.#modelSignature) return;
+
+    let meshBuffers: TileMesh;
+    if (modelSignature === 'globe') {
+      // model for globe projection
+      meshBuffers = createTileMesh(
+        {
+          granularity: 100,
+          generateBorders: false,
+          extendToNorthPole: true,
+          extendToSouthPole: true,
+        },
+        '16bit',
+      );
+    } else {
+      const vertices = new Int16Array([xmin, 0, xmax, 0, xmin, 1, xmin, 1, xmax, 0, xmax, 1]).map(
+        (x) => x * 8192,
+      ).buffer;
+
+      meshBuffers = {
+        vertices,
+        indices: new Uint16Array([0, 1, 2, 3, 4, 5]).buffer,
+        uses32bitIndices: false,
+      };
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.#vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, meshBuffers.vertices, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.#ibo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, meshBuffers.indices, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+
+    this.#indices = meshBuffers.indices.byteLength / 2;
+    this.#modelSignature = modelSignature;
   }
 
   // v4 interface

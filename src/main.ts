@@ -1,5 +1,5 @@
-import type { CustomLayerInterface, Map as MaplibreMap } from 'maplibre-gl';
-import { MercatorCoordinate } from 'maplibre-gl';
+import { MercatorCoordinate, createTileMesh } from 'maplibre-gl';
+import type { CustomLayerInterface, CustomRenderMethodInput, Map as MaplibreMap, TileMesh } from 'maplibre-gl';
 import type { mat4 } from 'gl-matrix';
 
 function radians(deg: number) {
@@ -68,9 +68,13 @@ export class NightLayer implements CustomLayerInterface {
   #twilightStepAngle: number;
   #twilightAttenuation: number;
 
-  #program?: WebGLProgram;
+  #programCache?: Map<string, WebGLProgram>;
   #map?: MaplibreMap;
-  #arrayBuffer?: WebGLBuffer;
+  #vbo?: WebGLBuffer;
+  #ibo?: WebGLBuffer;
+  #indices?: number;
+
+  #modelSignature?: string;
 
   /**
    * Create a new NightLayer instance. Intended to be passed to `map.addLayer`.
@@ -217,24 +221,106 @@ export class NightLayer implements CustomLayerInterface {
     this.#map?.triggerRepaint();
   }
 
+  #updateModel(gl: WebGLRenderingContext | WebGL2RenderingContext) {
+    if (!this.#map) return;
+    if (!this.#vbo) return;
+    if (!this.#ibo) return;
+
+    const [w, e] = this.#map.getBounds().toArray();
+    const xmin = Math.floor(MercatorCoordinate.fromLngLat(w).x);
+    const xmax = Math.ceil(MercatorCoordinate.fromLngLat(e).x);
+
+    const modelSignature = this.#map.style?.projection?.name === 'globe' ? 'globe' : [xmin, xmax].join(':');
+    if (modelSignature === this.#modelSignature) return;
+
+    let meshBuffers: TileMesh;
+    if (modelSignature === 'globe') {
+      // model for globe projection
+      meshBuffers = createTileMesh(
+        {
+          granularity: 100,
+          generateBorders: false,
+          extendToNorthPole: true,
+          extendToSouthPole: true,
+        },
+        '16bit',
+      );
+    } else {
+      const vertices = new Int16Array([xmin, 0, xmax, 0, xmin, 1, xmin, 1, xmax, 0, xmax, 1]).map(
+        (x) => x * 8192,
+      ).buffer;
+
+      meshBuffers = {
+        vertices,
+        indices: new Uint16Array([0, 1, 2, 3, 4, 5]).buffer,
+        uses32bitIndices: false,
+      };
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.#vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, meshBuffers.vertices, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.#ibo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, meshBuffers.indices, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+
+    this.#indices = meshBuffers.indices.byteLength / 2;
+    this.#modelSignature = modelSignature;
+  }
+
   onAdd(map: MaplibreMap, gl: WebGLRenderingContext) {
-    const vertexSource = `
+    this.#programCache = new Map();
+    this.#vbo = gl.createBuffer()!;
+    this.#ibo = gl.createBuffer()!;
+    this.#map = map;
+  }
+
+  onRemove() {
+    this.#programCache = undefined;
+    this.#map = undefined;
+    this.#vbo = undefined;
+    this.#ibo = undefined;
+  }
+
+  #createProgram(
+    gl: WebGLRenderingContext | WebGL2RenderingContext,
+    shaderData: { vertexShaderPrelude?: string; define?: string },
+  ) {
+    const isV4 = !shaderData.vertexShaderPrelude;
+
+    const vertexSource = `#version 300 es
       precision highp float;
 
-      attribute vec2 a_position;
+      in vec2 a_position;
+      out vec2 v_position;
 
+${
+  isV4
+    ? `
       uniform mat4 u_matrix;
 
-      varying vec2 v_position;
+      vec4 projectTile(vec2 pos) {
+        return u_matrix * vec4(pos, 0., 1.);
+      }
+`
+    : `
+      ${shaderData.vertexShaderPrelude}
+      ${shaderData.define}
+`
+}
 
       void main() {
-          vec4 tmp = u_matrix * vec4(a_position, 0.0, 1.0);
-          gl_Position = tmp;
-          v_position = a_position;
-      }`;
+        gl_Position = projectTile(a_position / 8192.); // scale to 0.0 - 1.0
+        v_position = a_position / 8192.;
+      }
+`;
 
-    const fragmentSource = `
+    const fragmentSource = `#version 300 es
       precision highp float;
+
+      in vec2 v_position;
+      out vec4 fragColor;
 
       uniform vec2 u_subsolar;
       uniform float u_opacity;
@@ -242,8 +328,6 @@ export class NightLayer implements CustomLayerInterface {
       uniform float u_twilight_steps;
       uniform float u_twilight_attenuation;
       uniform vec3 u_color;
-
-      varying vec2 v_position;
 
       vec2 mercatorToLngLat(vec2 mercator) {
         // 0 <= x <= 1, 0 <= y <= 1
@@ -276,7 +360,8 @@ export class NightLayer implements CustomLayerInterface {
         float brightness = clamp(pow(clamp(1. - att, 0., 1.), twilightLevel), 0., 1.);
         float darkness = (1. - brightness);
 
-        gl_FragColor = vec4(u_color / 255., 1.0) * darkness * u_opacity;
+        fragColor = vec4(v_position, 0.0, 1.0);
+        fragColor = vec4(u_color / 255., 1.0) * darkness * u_opacity;
       }`;
 
     const vertexShader = gl.createShader(gl.VERTEX_SHADER);
@@ -289,55 +374,89 @@ export class NightLayer implements CustomLayerInterface {
     gl.shaderSource(fragmentShader, fragmentSource);
     gl.compileShader(fragmentShader);
 
-    this.#program = gl.createProgram()!;
-    if (!this.#program) throw new Error('failed to create program');
-    gl.attachShader(this.#program, vertexShader);
-    gl.attachShader(this.#program, fragmentShader);
-    gl.linkProgram(this.#program);
+    const program = gl.createProgram()!;
+    if (!program) throw new Error('failed to create program');
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
 
-    this.#arrayBuffer = gl.createBuffer()!;
-
-    this.#map = map;
+    return program;
   }
 
-  onRemove() {
-    this.#map = undefined;
-    this.#arrayBuffer = undefined;
-    this.#program = undefined;
-  }
+  // v4 interface
+  render(gl: WebGLRenderingContext | WebGL2RenderingContext, matrix: mat4, options: CustomRenderMethodInput): void;
+  // v5 interface
+  render(gl: WebGLRenderingContext | WebGL2RenderingContext, options: CustomRenderMethodInput): void;
+  render(
+    gl: WebGLRenderingContext | WebGL2RenderingContext,
+    matrix: mat4 | CustomRenderMethodInput,
+    options?: CustomRenderMethodInput,
+  ) {
+    if (!options) {
+      // v5 interface
+      options = matrix as CustomRenderMethodInput;
+    }
 
-  render(gl: WebGLRenderingContext, matrix: mat4) {
-    if (!this.#arrayBuffer) return;
-    if (!this.#program) return;
+    if (!this.#programCache) return;
+    if (!this.#vbo) return;
+    if (!this.#ibo) return;
     if (!this.#map) return;
+
+    const shaderData = options.shaderData || {};
+    const programKey = shaderData.variantName || 'default';
+    if (!this.#programCache.has(programKey)) {
+      this.#programCache.set(programKey, this.#createProgram(gl, shaderData));
+    }
+    const program = this.#programCache.get(programKey);
+    if (!program) return;
 
     const { subsolarLng, subsolarLat } = this.getSubsolarPoint(this.#date || new Date());
 
-    const [w, e] = this.#map.getBounds().toArray();
-    const xmin = Math.floor(MercatorCoordinate.fromLngLat(w).x);
-    const xmax = Math.ceil(MercatorCoordinate.fromLngLat(e).x);
+    gl.useProgram(program);
 
-    gl.useProgram(this.#program);
+    gl.uniform2fv(gl.getUniformLocation(program, 'u_subsolar'), [subsolarLng, subsolarLat]);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_opacity'), this.#opacity);
+    gl.uniform3fv(gl.getUniformLocation(program, 'u_color'), this.#color);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_steps'), this.#twilightSteps);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_step_angle'), this.#twilightStepAngle);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_attenuation'), this.#twilightAttenuation);
 
-    gl.uniformMatrix4fv(gl.getUniformLocation(this.#program, 'u_matrix'), false, matrix);
-    gl.uniform2fv(gl.getUniformLocation(this.#program, 'u_subsolar'), [subsolarLng, subsolarLat]);
-    gl.uniform1f(gl.getUniformLocation(this.#program, 'u_opacity'), this.#opacity);
-    gl.uniform3fv(gl.getUniformLocation(this.#program, 'u_color'), this.#color);
-    gl.uniform1f(gl.getUniformLocation(this.#program, 'u_twilight_steps'), this.#twilightSteps);
-    gl.uniform1f(gl.getUniformLocation(this.#program, 'u_twilight_step_angle'), this.#twilightStepAngle);
-    gl.uniform1f(gl.getUniformLocation(this.#program, 'u_twilight_attenuation'), this.#twilightAttenuation);
+    if ('getProjectionDataForCustomLayer' in this.#map.transform) {
+      // v5 interface
+      const projectionData = this.#map.transform.getProjectionDataForCustomLayer(true);
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.#arrayBuffer);
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      new Float32Array([xmin, 0, xmax, 0, xmin, 1, xmin, 1, xmax, 0, xmax, 1]),
-      gl.DYNAMIC_DRAW,
-    );
-    const index = gl.getAttribLocation(this.#program, 'a_position');
+      // The magic: based on test/examples/globe-custom-simple.html
+      gl.uniformMatrix4fv(
+        gl.getUniformLocation(program, 'u_projection_fallback_matrix'),
+        false,
+        projectionData.fallbackMatrix, // convert mat4 from gl-matrix to a plain array
+      );
+      gl.uniformMatrix4fv(
+        gl.getUniformLocation(program, 'u_projection_matrix'),
+        false,
+        projectionData.mainMatrix, // convert mat4 from gl-matrix to a plain array
+      );
+      gl.uniform4f(
+        gl.getUniformLocation(program, 'u_projection_tile_mercator_coords'),
+        ...projectionData.tileMercatorCoords,
+      );
+      gl.uniform4f(gl.getUniformLocation(program, 'u_projection_clipping_plane'), ...projectionData.clippingPlane);
+      gl.uniform1f(gl.getUniformLocation(program, 'u_projection_transition'), projectionData.projectionTransition);
+    } else {
+      // v4 interface
+      gl.uniformMatrix4fv(gl.getUniformLocation(program, 'u_matrix'), false, matrix as mat4);
+    }
+
+    this.#updateModel(gl);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.#vbo);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.#ibo);
+
+    const index = gl.getAttribLocation(program, 'a_position');
     gl.enableVertexAttribArray(index);
-    gl.vertexAttribPointer(index, 2, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribPointer(index, 2, gl.SHORT, false, 0, 0);
 
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.drawElements(gl.TRIANGLES, this.#indices!, gl.UNSIGNED_SHORT, 0);
   }
 }
 

@@ -269,7 +269,7 @@ export class NightLayer implements CustomLayerInterface {
     this.#modelSignature = modelSignature;
   }
 
-  onAdd(map: MaplibreMap, gl: WebGLRenderingContext) {
+  onAdd(map: MaplibreMap, gl: WebGLRenderingContext | WebGL2RenderingContext) {
     this.#programCache = new Map();
     this.#vbo = gl.createBuffer()!;
     this.#ibo = gl.createBuffer()!;

@@ -360,7 +360,7 @@ ${
         '16bit',
       );
 
-      meshBuffers.vertices = new Float32Array(new Int16Array(meshBuffers.vertices)).map(x => x / 8192.0).buffer;
+      meshBuffers.vertices = new Float32Array(new Int16Array(meshBuffers.vertices)).map((x) => x / 8192.0).buffer;
     } else {
       const vertices = new Float32Array([xmin, 0, xmax, 0, xmin, 1, xmin, 1, xmax, 0, xmax, 1]).buffer;
 

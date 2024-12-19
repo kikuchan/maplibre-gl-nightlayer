@@ -16,7 +16,15 @@ import { NightLayer } from 'maplibre-gl-nightlayer';
   :
 
 map.on('load', () => {
-  map.addLayer(new NightLayer());
+  map.addLayer(new NightLayer({
+    // These are the default values
+    date: null,
+    opacity: 0.5,
+    color: [0, 0, 0],
+    twilightSteps: 0,
+    twilightStepAngle: 6,
+    twilightAttenuation: 0.5,
+  }));
 });
 ```
 
@@ -25,46 +33,46 @@ map.on('load', () => {
 type Color = [number, number, number];
 
 type Options = {
-    date?: Date | null;
-    opacity?: number;
-    color?: Color;
-    twilightSteps?: number;
-    twilightStepAngle?: number;
-    twilightAttenuation?: number;
+  date?: Date | null;
+  opacity?: number;
+  color?: Color;
+  twilightSteps?: number;
+  twilightStepAngle?: number;
+  twilightAttenuation?: number;
 };
 
-class NightLayer implements CustomLayerInterface {
-    constructor(opts?: Options);
+export class NightLayer implements CustomLayerInterface {
+  constructor(opts?: Options);
 
-    getSubsolarPoint(): {
-        lng: number;
-        lat: number;
-    };
+  getSubsolarPoint(): {
+    lng: number;
+    lat: number;
+  };
 
-    getDate(): Date | null;
-    setDate(date: Date | null): void;
+  getDate(): Date | null;
+  setDate(date: Date | null): void;
 
-    getOpacity(): number;
-    setOpacity(opacity: number): void;
+  getOpacity(): number;
+  setOpacity(opacity: number): void;
 
-    getColor(): Color;
-    setColor(color: Color): void;
+  getColor(): Color;
+  setColor(color: Color): void;
 
-    getTwilightSteps(): number;
-    setTwilightSteps(steps: number): void;
+  getTwilightSteps(): number;
+  setTwilightSteps(steps: number): void;
 
-    getTwilightStepAngle(): number;
-    setTwilightStepAngle(angle: number): void;
+  getTwilightStepAngle(): number;
+  setTwilightStepAngle(angle: number): void;
 
-    getTwilightAttenuation(): number;
-    setTwilightAttenuation(attenuation: number): void;
+  getTwilightAttenuation(): number;
+  setTwilightAttenuation(attenuation: number): void;
 
-      :
+    :
 };
 
 export function getSubsolarPoint(date?: Date): {
-    lng: number;
-    lat: number;
+  lng: number;
+  lat: number;
 };
 
 ```

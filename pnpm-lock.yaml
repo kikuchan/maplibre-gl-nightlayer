@@ -15,8 +15,8 @@ devDependencies:
     specifier: ^3.4.3
     version: 3.4.3
   maplibre-gl:
-    specifier: 5.0.0-pre.9
-    version: 5.0.0-pre.9
+    specifier: 5.0.0-pre.10
+    version: 5.0.0-pre.10
   typescript:
     specifier: ^5.7.2
     version: 5.7.2
@@ -660,8 +660,8 @@ packages:
     engines: {node: '>=0.10.0'}
     dev: true
 
-  /maplibre-gl@5.0.0-pre.9:
-    resolution: {integrity: sha512-OmsFfVyg+kMs8f2sldt9yVq95epgEkaXpwMG4i5SR9Xap/SsfgAxOTHau+XhduQu5nq4uIgQMZEr3T//8AX27g==}
+  /maplibre-gl@5.0.0-pre.10:
+    resolution: {integrity: sha512-t+RmPTwP77ZOGkV/8UzMtUnk96Cyl/WUbuqWPJzsb7KiK5i7Mf/WzAM1t1r+vbSq22FKJtbZy3H5xu6cOXaOZw==}
     engines: {node: '>=16.14.0', npm: '>=8.1.0'}
     dependencies:
       '@mapbox/geojson-rewind': 0.5.2

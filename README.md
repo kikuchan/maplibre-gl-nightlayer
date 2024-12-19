@@ -36,9 +36,9 @@ type Options = {
 class NightLayer implements CustomLayerInterface {
     constructor(opts?: Options);
 
-    getSubsolarPoint(date: Date): {
-        subsolarLng: number;
-        subsolarLat: number;
+    getSubsolarPoint(): {
+        lng: number;
+        lat: number;
     };
 
     getDate(): Date | null;
@@ -60,5 +60,11 @@ class NightLayer implements CustomLayerInterface {
     setTwilightAttenuation(attenuation: number): void;
 
       :
-}
+};
+
+export function getSubsolarPoint(date?: Date): {
+    lng: number;
+    lat: number;
+};
+
 ```

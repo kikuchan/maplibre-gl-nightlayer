@@ -10,6 +10,38 @@ function degrees(rad: number) {
   return (rad / Math.PI) * 180;
 }
 
+/**
+ * Get the subsolar point (longitude and latitude) at the given date.
+ * @param date If null, the current date is used.
+ * @returns The subsolar point.
+ */
+export function getSubsolarPoint(date?: Date) {
+  date = date || new Date();
+
+  // based on https://en.wikipedia.org/wiki/Equation_of_time#Alternative_calculation
+  const D = (date.getTime() - Date.UTC(date.getUTCFullYear(), 0, 0)) / 86400000;
+  const n = (2 * Math.PI) / 365.24;
+
+  const e = radians(23.44); // Earth's axial tilt
+  const E = 0.0167; // Earth's orbital eccentricity
+
+  const A = (D + 9) * n;
+  const B = A + 2 * E * Math.sin((D - 3) * n);
+  const C = (A - Math.atan2(Math.sin(B), Math.cos(B) * Math.cos(e))) / Math.PI;
+
+  const EOT = 720 * (C - Math.trunc(C + 0.5));
+
+  const UTC = date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600;
+
+  const lng = -15 * (UTC - 12 + EOT / 60);
+  const lat = degrees(Math.asin(Math.sin(-e) * Math.cos(B)));
+
+  return {
+    lng,
+    lat,
+  };
+}
+
 type Color = [number, number, number];
 
 /**
@@ -91,32 +123,11 @@ export class NightLayer implements CustomLayerInterface {
   }
 
   /**
-   * Get the subsolar point (longitude and latitude) at the given date.
-   * @param date If null, the current date is used.
+   * Get the current subsolar point (longitude and latitude)
+   * @returns The subsolar point.
    */
-  getSubsolarPoint(date: Date) {
-    // based on https://en.wikipedia.org/wiki/Equation_of_time#Alternative_calculation
-    const D = (date.getTime() - Date.UTC(date.getUTCFullYear(), 0, 0)) / 86400000;
-    const n = (2 * Math.PI) / 365.24;
-
-    const e = radians(23.44); // Earth's axial tilt
-    const E = 0.0167; // Earth's orbital eccentricity
-
-    const A = (D + 9) * n;
-    const B = A + 2 * E * Math.sin((D - 3) * n);
-    const C = (A - Math.atan2(Math.sin(B), Math.cos(B) * Math.cos(e))) / Math.PI;
-
-    const EOT = 720 * (C - Math.trunc(C + 0.5));
-
-    const UTC = date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600;
-
-    const subsolarLng = -15 * (UTC - 12 + EOT / 60);
-    const subsolarLat = degrees(Math.asin(Math.sin(-e) * Math.cos(B)));
-
-    return {
-      subsolarLng,
-      subsolarLat,
-    };
+  getSubsolarPoint() {
+    return getSubsolarPoint(this.#date || new Date());
   }
 
   /**
@@ -410,7 +421,7 @@ ${
     const program = this.#programCache.get(programKey);
     if (!program) return;
 
-    const { subsolarLng, subsolarLat } = this.getSubsolarPoint(this.#date || new Date());
+    const { lng: subsolarLng, lat: subsolarLat } = this.getSubsolarPoint();
 
     gl.useProgram(program);
 

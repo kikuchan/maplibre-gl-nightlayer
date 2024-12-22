@@ -10,6 +10,11 @@ function degrees(rad: number) {
   return (rad / Math.PI) * 180;
 }
 
+function premultiplyAlpha(c: number[]) {
+  const [r, g, b, a] = c.map((x) => x / 255);
+  return [r * a, g * a, b * a, a];
+}
+
 /**
  * Get the subsolar point (longitude and latitude) at the given date.
  * @param date If null, the current date is used.
@@ -42,7 +47,9 @@ export function getSubsolarPoint(date?: Date) {
   };
 }
 
-type Color = [number, number, number];
+type Color3 = [number, number, number];
+type Color4 = [number, number, number, number];
+type Color = Color3 | Color4;
 
 /**
  * Options for the NightLayer.
@@ -55,27 +62,31 @@ type Options = {
   date?: Date | null;
 
   /**
-   * Opacity of the shadow.
+   * Opacity of the layer.
    * 0.0 means fully transparent, 1.0 means fully opaque
+   * default: 0.5
    */
   opacity?: number;
 
   /**
-   * Color of the shadow.
+   * Color of the shadow: [r, g, b, a]
    * Each value should be in the range [0, 255].
+   * default: [0, 0, 0, 255]
    */
   color?: Color;
+
+  /**
+   * Color of the daytime: [r, g, b, a]
+   * Each value should be in the range [0, 255].
+   * default: [0, 0, 0, 0]
+   */
+  daytimeColor?: Color;
 
   /**
    * Number of twilight steps.
    * 0 means no steps (gradation), 1 means one step (day/night), etc.
    */
   twilightSteps?: number;
-
-  /**
-   * Angle for each twilight step in degrees.
-   */
-  twilightStepAngle?: number;
 
   /**
    * Attenuation factor for each twilight step.
@@ -94,10 +105,10 @@ export class NightLayer implements CustomLayerInterface {
 
   #date: Date | null;
   #opacity: number;
-  #color: Color;
+  #color!: Color4;
+  #daytimeColor!: Color4;
 
   #twilightSteps: number;
-  #twilightStepAngle: number;
   #twilightAttenuation: number;
 
   #programCache?: Map<string, WebGLProgram>;
@@ -115,11 +126,12 @@ export class NightLayer implements CustomLayerInterface {
   constructor(opts: Options = {}) {
     this.#date = opts.date ?? null;
     this.#opacity = opts.opacity ?? 0.5;
-    this.#color = opts.color ?? [0, 0, 0];
 
     this.#twilightSteps = opts.twilightSteps ?? 0;
-    this.#twilightStepAngle = opts.twilightStepAngle ?? 6;
     this.#twilightAttenuation = opts.twilightAttenuation ?? 0.5;
+
+    this.setColor(opts.color ?? [0, 0, 0, 255]);
+    this.setDaytimeColor(opts.daytimeColor ?? [0, 0, 0, 0]);
   }
 
   /**
@@ -177,7 +189,24 @@ export class NightLayer implements CustomLayerInterface {
    * @param color Each value should be in the range [0, 255].
    */
   setColor(color: Color) {
-    this.#color = color;
+    this.#color = [...color.slice(0, 3) as Color3, color?.[3] ?? 255];
+    this.#map?.triggerRepaint();
+  }
+
+  /**
+   * Get the color of the daytime.
+   * @returns The color [r, g, b, a]. Each value is in the range [0, 255].
+   */
+  getDaytimeColor() {
+    return this.#daytimeColor;
+  }
+
+  /**
+   * Set the color of the daytime.
+   * @param color Each value should be in the range [0, 255].
+   */
+  setDaytimeColor(color: Color) {
+    this.#daytimeColor = [...color.slice(0, 3) as Color3, color?.[3] ?? 255];
     this.#map?.triggerRepaint();
   }
 
@@ -195,23 +224,6 @@ export class NightLayer implements CustomLayerInterface {
    */
   setTwilightSteps(steps: number) {
     this.#twilightSteps = steps;
-    this.#map?.triggerRepaint();
-  }
-
-  /**
-   * Get the angle for each twilight step.
-   * @returns The angle in degrees.
-   */
-  getTwilightStepAngle() {
-    return this.#twilightStepAngle;
-  }
-
-  /**
-   * Set the angle for each twilight step.
-   * @param angle in degrees.
-   */
-  setTwilightStepAngle(angle: number) {
-    this.#twilightStepAngle = angle;
     this.#map?.triggerRepaint();
   }
 
@@ -287,10 +299,10 @@ ${
 
       uniform vec2 u_subsolar;
       uniform float u_opacity;
-      uniform float u_twilight_step_angle;
       uniform float u_twilight_steps;
       uniform float u_twilight_attenuation;
-      uniform vec3 u_color;
+      uniform vec4 u_daytime_color;
+      uniform vec4 u_night_color;
 
       vec2 mercatorToLngLat(vec2 mercator) {
         // 0 <= x <= 1, 0 <= y <= 1
@@ -312,7 +324,7 @@ ${
         float B = cos(observer.y) * cos(subsolar.y) * cos(subsolar.x - observer.x);
         float altitude = degrees(asin(A + B));
 
-        float twilightStepAngle = u_twilight_step_angle;
+        float twilightStepAngle = 6.0;
         float twilightBegins = -0.8333333;
         float twilightSteps = u_twilight_steps;
 
@@ -328,10 +340,7 @@ ${
           }
         }
         float brightness = clamp(pow(clamp(1. - att, 0., 1.), twilightLevel), 0., 1.);
-        float darkness = (1. - brightness);
-
-        fragColor = vec4(v_position, 0.0, 1.0);
-        fragColor = vec4(u_color / 255., 1.0) * darkness * u_opacity;
+        fragColor = mix(u_night_color, u_daytime_color, brightness) * u_opacity;
       }`;
 
     const vertexShader = gl.createShader(gl.VERTEX_SHADER);
@@ -434,9 +443,9 @@ ${
 
     gl.uniform2fv(gl.getUniformLocation(program, 'u_subsolar'), [subsolarLng, subsolarLat]);
     gl.uniform1f(gl.getUniformLocation(program, 'u_opacity'), this.#opacity);
-    gl.uniform3fv(gl.getUniformLocation(program, 'u_color'), this.#color);
+    gl.uniform4fv(gl.getUniformLocation(program, 'u_night_color'), premultiplyAlpha(this.#color));
+    gl.uniform4fv(gl.getUniformLocation(program, 'u_daytime_color'), premultiplyAlpha(this.#daytimeColor));
     gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_steps'), this.#twilightSteps);
-    gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_step_angle'), this.#twilightStepAngle);
     gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_attenuation'), this.#twilightAttenuation);
 
     if ('getProjectionDataForCustomLayer' in this.#map.transform) {

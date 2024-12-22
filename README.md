@@ -20,9 +20,9 @@ map.on('load', () => {
     // These are the default values
     date: null,
     opacity: 0.5,
-    color: [0, 0, 0],
+    color: [0, 0, 0, 255],
+    daytimeColor: [0, 0, 0, 0], // transparent
     twilightSteps: 0,
-    twilightStepAngle: 6,
     twilightAttenuation: 0.5,
   }));
 });
@@ -30,14 +30,16 @@ map.on('load', () => {
 
 ## API
 ```ts
-type Color = [number, number, number];
+type Color3 = [number, number, number];
+type Color4 = [number, number, number, number];
+type Color = Color3 | Color4;
 
 type Options = {
   date?: Date | null;
   opacity?: number;
   color?: Color;
+  daytimeColor?: Color;
   twilightSteps?: number;
-  twilightStepAngle?: number;
   twilightAttenuation?: number;
 };
 
@@ -55,14 +57,14 @@ export class NightLayer implements CustomLayerInterface {
   getOpacity(): number;
   setOpacity(opacity: number): void;
 
-  getColor(): Color;
+  getColor(): Color4;
   setColor(color: Color): void;
+
+  getDaytimeColor(): Color4;
+  setDaytimeColor(color: Color);
 
   getTwilightSteps(): number;
   setTwilightSteps(steps: number): void;
-
-  getTwilightStepAngle(): number;
-  setTwilightStepAngle(angle: number): void;
 
   getTwilightAttenuation(): number;
   setTwilightAttenuation(attenuation: number): void;

@@ -10,7 +10,7 @@
     "dist/"
   ],
   "scripts": {
-    "dev": "vite playground/",
+    "dev": "vite playground/v5",
     "build": "pnpm run build:esm && pnpm run build:types",
     "build:esm": "esbuild src/main.ts --minify --outfile=dist/main.js",
     "build:types": "tsc --declaration --emitDeclarationOnly --declarationDir './dist'",

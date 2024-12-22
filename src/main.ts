@@ -311,7 +311,9 @@ ${
         float A = sin(observer.y) * sin(subsolar.y);
         float B = cos(observer.y) * cos(subsolar.y) * cos(subsolar.x - observer.x);
         float altitude = degrees(asin(A + B));
+
         float twilightStepAngle = u_twilight_step_angle;
+        float twilightBegins = -0.8333333;
         float twilightSteps = u_twilight_steps;
 
         // Attenuation for each twilightStepAngle
@@ -319,6 +321,11 @@ ${
         float twilightLevel = -altitude / twilightStepAngle;
         if (twilightSteps > 0.) {
           twilightLevel = ceil(clamp(twilightLevel, 0., twilightSteps));
+
+          if (altitude > twilightBegins) {
+            // XXX: Adjust for sunset/sunrise line
+            twilightLevel = 0.;
+          }
         }
         float brightness = clamp(pow(clamp(1. - att, 0., 1.), twilightLevel), 0., 1.);
         float darkness = (1. - brightness);

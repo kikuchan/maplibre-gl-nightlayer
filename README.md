@@ -24,6 +24,7 @@ map.on('load', () => {
     daytimeColor: [0, 0, 0, 0], // transparent
     twilightSteps: 0,
     twilightAttenuation: 0.5,
+    updateInterval: 10000, // in milliseconds
   }));
 });
 ```
@@ -61,13 +62,16 @@ export class NightLayer implements CustomLayerInterface {
   setColor(color: Color): void;
 
   getDaytimeColor(): Color4;
-  setDaytimeColor(color: Color);
+  setDaytimeColor(color: Color): void;
 
   getTwilightSteps(): number;
   setTwilightSteps(steps: number): void;
 
   getTwilightAttenuation(): number;
   setTwilightAttenuation(attenuation: number): void;
+
+  getUpdateInterval(): number;
+  setUpdateInterval(interval: number): void;
 
     :
 };

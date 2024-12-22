@@ -36,15 +36,13 @@ export function getSubsolarPoint(date?: Date) {
 
   const EOT = 720 * (C - Math.trunc(C + 0.5));
 
-  const UTC = date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600;
+  const UTC =
+    date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600 + date.getUTCMilliseconds() / 3600000;
 
   const lng = -15 * (UTC - 12 + EOT / 60);
   const lat = degrees(Math.asin(Math.sin(-e) * Math.cos(B)));
 
-  return {
-    lng,
-    lat,
-  };
+  return { lng, lat };
 }
 
 type Color3 = [number, number, number];
@@ -85,14 +83,23 @@ type Options = {
   /**
    * Number of twilight steps.
    * 0 means no steps (gradation), 1 means one step (day/night), etc.
+   * default: 0
    */
   twilightSteps?: number;
 
   /**
    * Attenuation factor for each twilight step.
    * 0.0 means no attenuation, 1.0 means full attenuation
+   * default: 0.5
    */
   twilightAttenuation?: number;
+
+  /**
+   * Update interval in milliseconds.
+   * Periodically triggers a repaint.
+   * default: 10000
+   */
+  updateInterval?: number;
 };
 
 /**
@@ -103,10 +110,13 @@ export class NightLayer implements CustomLayerInterface {
   type = 'custom' as const;
   renderingMode = '2d' as const;
 
-  #date: Date | null;
+  #date!: Date | null;
   #opacity: number;
   #color!: Color4;
   #daytimeColor!: Color4;
+
+  #updateIntervalTimer?: number;
+  #updateInterval: number;
 
   #twilightSteps: number;
   #twilightAttenuation: number;
@@ -124,14 +134,26 @@ export class NightLayer implements CustomLayerInterface {
    * @param opts The options.
    */
   constructor(opts: Options = {}) {
-    this.#date = opts.date ?? null;
     this.#opacity = opts.opacity ?? 0.5;
 
     this.#twilightSteps = opts.twilightSteps ?? 0;
     this.#twilightAttenuation = opts.twilightAttenuation ?? 0.5;
+    this.#updateInterval = opts.updateInterval ?? 10000;
 
     this.setColor(opts.color ?? [0, 0, 0, 255]);
     this.setDaytimeColor(opts.daytimeColor ?? [0, 0, 0, 0]);
+    this.setDate(opts.date ?? null);
+  }
+
+  #setIntervalTimer() {
+    const activate = this.#date === null;
+    if (this.#updateIntervalTimer) {
+      clearInterval(this.#updateIntervalTimer);
+      this.#updateIntervalTimer = undefined;
+    }
+    if (activate && this.#updateInterval > 0) {
+      this.#updateIntervalTimer = setInterval(() => this.#map?.triggerRepaint(), this.#updateInterval);
+    }
   }
 
   /**
@@ -156,6 +178,7 @@ export class NightLayer implements CustomLayerInterface {
    */
   setDate(date: Date | null) {
     this.#date = date;
+    this.#setIntervalTimer();
     this.#map?.triggerRepaint();
   }
 
@@ -189,7 +212,7 @@ export class NightLayer implements CustomLayerInterface {
    * @param color Each value should be in the range [0, 255].
    */
   setColor(color: Color) {
-    this.#color = [...color.slice(0, 3) as Color3, color?.[3] ?? 255];
+    this.#color = [...(color.slice(0, 3) as Color3), color?.[3] ?? 255];
     this.#map?.triggerRepaint();
   }
 
@@ -206,7 +229,7 @@ export class NightLayer implements CustomLayerInterface {
    * @param color Each value should be in the range [0, 255].
    */
   setDaytimeColor(color: Color) {
-    this.#daytimeColor = [...color.slice(0, 3) as Color3, color?.[3] ?? 255];
+    this.#daytimeColor = [...(color.slice(0, 3) as Color3), color?.[3] ?? 255];
     this.#map?.triggerRepaint();
   }
 
@@ -242,6 +265,23 @@ export class NightLayer implements CustomLayerInterface {
   setTwilightAttenuation(attenuation: number) {
     this.#twilightAttenuation = attenuation;
     this.#map?.triggerRepaint();
+  }
+
+  /**
+   * Get the update interval.
+   * @returns The interval in milliseconds.
+   */
+  getUpdateInterval() {
+    return this.#updateInterval;
+  }
+
+  /**
+   * Set the update interval.
+   * @param interval The interval in milliseconds..
+   */
+  setUpdateInterval(interval: number) {
+    this.#updateInterval = interval;
+    this.#setIntervalTimer();
   }
 
   onAdd(map: MaplibreMap, gl: WebGLRenderingContext | WebGL2RenderingContext) {

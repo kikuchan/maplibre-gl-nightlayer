@@ -36,6 +36,6 @@
     "gl-matrix": "^3.4.3",
     "maplibre-gl": "5.0.0",
     "typescript": "^5.7.2",
-    "vite": "^6.0.6"
+    "vite": "^6.0.7"
   }
 }

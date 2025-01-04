@@ -3,13 +3,11 @@
 Adds a simple night shadow (Earth's shadow) on the map.
 ![image](https://github.com/user-attachments/assets/425f58e0-66f6-4779-8c03-ff543972c59e)
 
-## Install
+## Usage
+### Module
 ```sh
 $ npm install --save-dev maplibre-gl-nightlayer
 ```
-
-## Usage
-
 ```js
 import { NightLayer } from 'maplibre-gl-nightlayer';
 
@@ -25,6 +23,19 @@ map.on('load', () => {
     twilightSteps: 0,
     twilightAttenuation: 0.5,
     updateInterval: 10000, // in milliseconds
+  }));
+});
+```
+
+### via CDN
+
+```html
+<script src="https://unpkg.com/maplibre-gl-nightlayer@latest/dist/nightlayer.min.js"></script>
+```
+```js
+map.on('load', () => {
+  map.addLayer(new nightLayer.NightLayer({
+    :
   }));
 });
 ```

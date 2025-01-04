@@ -8,6 +8,9 @@ devDependencies:
   '@biomejs/biome':
     specifier: ^1.9.4
     version: 1.9.4
+  '@fal-works/esbuild-plugin-global-externals':
+    specifier: ^2.1.2
+    version: 2.1.2
   esbuild:
     specifier: ^0.24.2
     version: 0.24.2
@@ -338,6 +341,10 @@ packages:
     requiresBuild: true
     dev: true
     optional: true
+
+  /@fal-works/esbuild-plugin-global-externals@2.1.2:
+    resolution: {integrity: sha512-cEee/Z+I12mZcFJshKcCqC8tuX5hG3s+d+9nZ3LabqKF1vKdF41B92pJVCBggjAGORAeOzyyDDKrZwIkLffeOQ==}
+    dev: true
 
   /@mapbox/geojson-rewind@0.5.2:
     resolution: {integrity: sha512-tJaT+RbYGJYStt7wI3cq4Nl4SXxG8W7JDG5DMJu97V25RnbNg3QtQtf+KD+VLjNpWKYsRvXDNmNrBgEETr1ifA==}

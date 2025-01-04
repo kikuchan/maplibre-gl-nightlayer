@@ -11,8 +11,7 @@
   ],
   "scripts": {
     "dev": "vite playground/v5",
-    "build": "pnpm run build:esm && pnpm run build:types",
-    "build:esm": "esbuild src/main.ts --minify --outfile=dist/main.js",
+    "build": "node ./build.mjs && pnpm run build:types",
     "build:types": "tsc --declaration --emitDeclarationOnly --declarationDir './dist'",
     "lint": "biome lint ./src",
     "lint:fix": "biome lint ./src --write",
@@ -32,6 +31,7 @@
   "license": "MIT",
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
+    "@fal-works/esbuild-plugin-global-externals": "^2.1.2",
     "esbuild": "^0.24.2",
     "gl-matrix": "^3.4.3",
     "maplibre-gl": "5.0.0",

@@ -10,11 +10,17 @@ const map = new maplibregl.Map({
   zoom: 0, // starting zoom
 });
 
+const nightLayer = new NightLayer({
+  color: [0, 0, 64],
+  twilightSteps: 0,
+});
+
+const timescope = new Timescope({
+  target: '#timescope',
+  zoom: -14,
+});
+
 map.on('load', () => {
-  const nightLayer = new NightLayer({
-    color: [0, 0, 64],
-    twilightSteps: 0,
-  });
   map.addLayer(nightLayer);
 
   document.getElementById('btn-projection').addEventListener('click', () => {
@@ -30,14 +36,9 @@ map.on('load', () => {
   document.getElementById('sel-twilightstep').addEventListener('change', (e) => {
     nightLayer.setTwilightSteps(e.target.value);
   });
+});
 
-  const timescope = new Timescope({
-    target: '#timescope',
-    zoom: -14,
-  });
-
-  timescope.on('change', () => {
-    if (!timescope.timeForAnimation) return nightLayer.setDate(null);
-    nightLayer.setDate(new Date(timescope.timeForAnimation.number() * 1000));
-  });
+timescope.on('change', () => {
+  if (!timescope.timeForAnimation) return nightLayer.setDate(null);
+  nightLayer.setDate(new Date(timescope.timeForAnimation.number() * 1000));
 });

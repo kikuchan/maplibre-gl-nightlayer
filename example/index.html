@@ -16,16 +16,25 @@
       height: 100%;
     }
     #timescope {
-      position: fixed;
-      bottom: 0;
-      left: 0;
+      flex: none;
       width: 100%;
       border-top: 1px solid #ccc;
+    }
+
+    #container {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
     }
   </style>
 </head>
 <body>
-  <div id="map"></div>
+  <div id="container">
+    <div id="map"></div>
+    <div id="timescope"></div>
+  </div>
+
   <div style="position: fixed; left: 1em; top: 1em; display: flex; gap: 0.5em; background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 0.5em;">
     <button id="btn-nightlayer">Toggle NightLayer</button>
     <div>
@@ -40,6 +49,5 @@
     </div>
     <button id="btn-projection">Toggle Projection</button>
   </div>
-  <div id="timescope"></div>
 </body>
 </html>

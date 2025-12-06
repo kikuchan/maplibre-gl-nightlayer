@@ -1,6 +1,7 @@
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { NightLayer } from '../../src/main';
+import { Timescope } from 'timescope';
 
 const map = new maplibregl.Map({
   container: 'map', // container id
@@ -28,5 +29,15 @@ map.on('load', () => {
 
   document.getElementById('sel-twilightstep').addEventListener('change', (e) => {
     nightLayer.setTwilightSteps(e.target.value);
+  });
+
+  const timescope = new Timescope({
+    target: '#timescope',
+    zoom: -14,
+  });
+
+  timescope.on('change', () => {
+    if (!timescope.timeForAnimation) return nightLayer.setDate(null);
+    nightLayer.setDate(new Date(timescope.timeForAnimation.number() * 1000));
   });
 });

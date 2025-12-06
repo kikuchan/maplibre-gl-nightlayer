@@ -13,6 +13,7 @@
   "license": "MIT",
   "devDependencies": {
     "maplibre-gl": "5.14.0",
+    "timescope": "0.0.0-alpha.4",
     "vite": "^7.2.6"
   }
 }

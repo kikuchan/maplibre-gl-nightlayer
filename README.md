@@ -3,6 +3,9 @@
 Adds a simple night shadow (Earth's shadow) on the map.
 ![image](https://github.com/user-attachments/assets/425f58e0-66f6-4779-8c03-ff543972c59e)
 
+## Demo
+[example](https://kikuchan.github.io/maplibre-gl-nightlayer/)
+
 ## Usage
 ### Module
 ```sh

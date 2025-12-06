@@ -10,9 +10,10 @@
     "dist/"
   ],
   "scripts": {
-    "dev": "vite playground/v5",
+    "dev": "vite example",
     "build": "node ./build.mjs && pnpm run build:types",
     "build:types": "tsc --declaration --emitDeclarationOnly --declarationDir './dist'",
+    "build:example": "vite build example",
     "lint": "biome lint ./src",
     "lint:fix": "biome lint ./src --write",
     "format": "biome format ./src",

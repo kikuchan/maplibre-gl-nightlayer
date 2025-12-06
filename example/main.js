@@ -1,6 +1,6 @@
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { NightLayer } from '../../src/main';
+import { NightLayer } from '../src/main';
 import { Timescope } from 'timescope';
 
 const map = new maplibregl.Map({

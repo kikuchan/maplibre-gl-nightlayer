@@ -30,15 +30,15 @@
   "homepage": "https://github.com/kikuchan/maplibre-gl-nightlayer#readme",
   "license": "MIT",
   "devDependencies": {
-    "@biomejs/biome": "^1.9.4",
+    "@biomejs/biome": "^2.3.8",
     "@fal-works/esbuild-plugin-global-externals": "^2.1.2",
-    "esbuild": "^0.25.1",
-    "gl-matrix": "^3.4.3",
-    "maplibre-gl": "5.2.0",
-    "typescript": "^5.8.2",
-    "vite": "^6.2.2"
+    "esbuild": "^0.27.1",
+    "gl-matrix": "^3.4.4",
+    "maplibre-gl": "5.14.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.6"
   },
-  "packageManager": "pnpm@10.6.4+sha512.da3d715bfd22a9a105e6e8088cfc7826699332ded60c423b14ec613a185f1602206702ff0fe4c438cb15c979081ce4cb02568e364b15174503a63c7a8e2a5f6c",
+  "packageManager": "pnpm@10.24.0",
   "pnpm": {
     "onlyBuiltDependencies": [
       "@biomejs/biome",

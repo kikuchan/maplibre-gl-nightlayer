@@ -29,6 +29,9 @@
   ],
   "author": "kikuchan98@gmail.com",
   "homepage": "https://github.com/kikuchan/maplibre-gl-nightlayer#readme",
+  "repository": {
+    "url": "https://github.com/kikuchan/maplibre-gl-nightlayer"
+  },
   "license": "MIT",
   "devDependencies": {
     "@biomejs/biome": "^2.3.8",

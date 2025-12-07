@@ -18,6 +18,7 @@ const nightLayer = new NightLayer({
 const timescope = new Timescope({
   target: '#timescope',
   zoom: -14,
+  timeRange: [undefined, undefined],
 });
 
 map.on('load', () => {

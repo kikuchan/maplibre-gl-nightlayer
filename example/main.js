@@ -19,6 +19,14 @@ const timescope = new Timescope({
   target: '#timescope',
   zoom: -14,
   timeRange: [undefined, undefined],
+  tracks: {
+    default: {
+      symmetric: true,
+    },
+  },
+  style: {
+    height: '48px'
+  },
 });
 
 map.on('load', () => {
@@ -41,5 +49,5 @@ map.on('load', () => {
 
 timescope.on('change', () => {
   if (!timescope.timeForAnimation) return nightLayer.setDate(null);
-  nightLayer.setDate(new Date(timescope.timeForAnimation.number() * 1000));
+  nightLayer.setTime(timescope.timeForAnimation);
 });

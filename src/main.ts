@@ -1,3 +1,4 @@
+import { Decimal } from '@kikuchan/decimal';
 import { MercatorCoordinate, createTileMesh } from 'maplibre-gl';
 import type { CustomLayerInterface, CustomRenderMethodInput, Map as MaplibreMap, TileMesh } from 'maplibre-gl';
 import type { mat4 } from 'gl-matrix';
@@ -10,6 +11,83 @@ function degrees(rad: number) {
   return (rad / Math.PI) * 180;
 }
 
+const SECONDS_PER_DAY = 86400n;
+const DAYS_0000_TO_1970 = 719528n;
+const DAYS_PER_400_YEARS = 146097n;
+
+function floorDiv(a: bigint, b: bigint) {
+  const q = a / b;
+  const r = a % b;
+  return r !== 0n && ((a < 0n) !== (b < 0n)) ? q - 1n : q;
+}
+
+function floorMod(a: bigint, b: bigint) {
+  return a - floorDiv(a, b) * b;
+}
+
+function isLeapYear(year: bigint) {
+  if (year % 4n !== 0n) return false;
+  if (year % 100n !== 0n) return true;
+  return year % 400n === 0n;
+}
+
+function unixToCalendar(unixSeconds: Decimal) {
+  const wholeSecondsDecimal = unixSeconds.floor(0);
+  const wholeSeconds = wholeSecondsDecimal.integer();
+  const fractionalSecond = unixSeconds.sub(wholeSecondsDecimal);
+
+  const epochDay = floorDiv(wholeSeconds, SECONDS_PER_DAY);
+  const secondsOfDay = floorMod(wholeSeconds, SECONDS_PER_DAY);
+
+  let zeroDay = epochDay + DAYS_0000_TO_1970;
+  zeroDay -= 60n;
+
+  const era = floorDiv(zeroDay, DAYS_PER_400_YEARS);
+  const dayOfEra = zeroDay - era * DAYS_PER_400_YEARS;
+  const yearOfEra = floorDiv(
+    dayOfEra - dayOfEra / 1460n + dayOfEra / 36524n - dayOfEra / 146096n,
+    365n,
+  );
+
+  let year = yearOfEra + era * 400n;
+  const dayOfYearMarchBased = dayOfEra - (365n * yearOfEra + yearOfEra / 4n - yearOfEra / 100n);
+  const marchMonth = (5n * dayOfYearMarchBased + 2n) / 153n;
+  const day = dayOfYearMarchBased - (153n * marchMonth + 2n) / 5n + 1n;
+  let month = marchMonth + 3n;
+
+  if (month > 12n) {
+    month -= 12n;
+    year += 1n;
+  }
+
+  const monthLengths = [
+    31n,
+    isLeapYear(year) ? 29n : 28n,
+    31n,
+    30n,
+    31n,
+    30n,
+    31n,
+    31n,
+    30n,
+    31n,
+    30n,
+    31n,
+  ];
+
+  let dayOfYear = day;
+  for (let i = 0; i < Number(month) - 1; i += 1) {
+    dayOfYear += monthLengths[i];
+  }
+
+  const secondsOfDayDecimal = Decimal(secondsOfDay.toString()).add(fractionalSecond);
+
+  return {
+    dayOfYear,
+    secondsOfDayDecimal,
+  };
+}
+
 function premultiplyAlpha(c: number[]) {
   const [r, g, b, a] = c.map((x) => x / 255);
   return [r * a, g * a, b * a, a];
@@ -20,11 +98,14 @@ function premultiplyAlpha(c: number[]) {
  * @param date If null, the current date is used.
  * @returns The subsolar point.
  */
-export function getSubsolarPoint(date?: Date) {
-  date = date || new Date();
+export function getSubsolarPoint(date?: Decimal | null) {
+  if (date == null) date = Decimal(Date.now() / 1000);
 
   // based on https://en.wikipedia.org/wiki/Equation_of_time#Alternative_calculation
-  const D = (date.getTime() - Date.UTC(date.getUTCFullYear(), 0, 0)) / 86400000;
+  const { dayOfYear, secondsOfDayDecimal } = unixToCalendar(date);
+  const D = Decimal(dayOfYear.toString())
+    .add(secondsOfDayDecimal.div(86400))
+    .number();
   const n = (2 * Math.PI) / 365.24;
 
   const e = radians(23.44); // Earth's axial tilt
@@ -36,8 +117,7 @@ export function getSubsolarPoint(date?: Date) {
 
   const EOT = 720 * (C - Math.trunc(C + 0.5));
 
-  const UTC =
-    date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600 + date.getUTCMilliseconds() / 3600000;
+  const UTC = secondsOfDayDecimal.div(3600).number();
 
   const lng = -15 * (UTC - 12 + EOT / 60);
   const lat = degrees(Math.asin(Math.sin(-e) * Math.cos(B)));
@@ -110,7 +190,7 @@ export class NightLayer implements CustomLayerInterface {
   type = 'custom' as const;
   renderingMode = '2d' as const;
 
-  #date!: Date | null;
+  #date!: Decimal | null;
   #opacity: number;
   #color!: Color4;
   #daytimeColor!: Color4;
@@ -161,7 +241,7 @@ export class NightLayer implements CustomLayerInterface {
    * @returns The subsolar point.
    */
   getSubsolarPoint() {
-    return getSubsolarPoint(this.#date || new Date());
+    return getSubsolarPoint(this.#date);
   }
 
   /**
@@ -169,6 +249,10 @@ export class NightLayer implements CustomLayerInterface {
    * @returns The date. If null, the current date is used.
    */
   getDate() {
+    return this.#date ? new Date(this.#date.mul(1000).number()) : null;
+  }
+
+  getTime() {
     return this.#date;
   }
 
@@ -177,7 +261,12 @@ export class NightLayer implements CustomLayerInterface {
    * @param date If null, the current date is used.
    */
   setDate(date: Date | null) {
-    this.#date = date;
+    this.setTime(date);
+  }
+
+  setTime(date: Date | null | number | Decimal) {
+    if (date instanceof Date) date = Decimal(date.getTime()).div(1000);
+    this.#date = Decimal(date);
     this.#setIntervalTimer();
     this.#map?.triggerRepaint();
   }

@@ -12,8 +12,8 @@ importers:
         specifier: 5.14.0
         version: 5.14.0
       timescope:
-        specifier: 0.0.0-alpha.4
-        version: 0.0.0-alpha.4
+        specifier: 0.0.0-alpha.5
+        version: 0.0.0-alpha.5
       vite:
         specifier: ^7.2.6
         version: 7.2.6
@@ -427,8 +427,8 @@ packages:
   supercluster@8.0.1:
     resolution: {integrity: sha512-IiOea5kJ9iqzD2t7QJq/cREyLHTtSmUT6gQsweojg9WH2sYJqZK9SswTu6jrscO6D1G5v5vYZ9ru/eq85lXeZQ==}
 
-  timescope@0.0.0-alpha.4:
-    resolution: {integrity: sha512-+er2w52RSim/MHQpVP7Up94QGSxGWZBMcJVi6AZKyF1YLUZgGPahx96ikHlTEcktLmYwdEQtaFa74XayQlAnbw==}
+  timescope@0.0.0-alpha.5:
+    resolution: {integrity: sha512-Jsep5R1/uf9SfRjdXY4R1dALLT9v+dGxUo7iy5nqxkxKcIkXz/G5ojA5o91ZpNT/FUlvQ05nZG9J128vELRocQ==}
 
   tinyglobby@0.2.15:
     resolution: {integrity: sha512-j2Zq4NyQYG5XMST4cbs02Ak8iJUdxRM0XI5QyxXuZOzKOINmWurp3smXu3y5wDcJrptwpSjgXHzIQxR0omXljQ==}
@@ -820,7 +820,7 @@ snapshots:
     dependencies:
       kdbush: 4.0.2
 
-  timescope@0.0.0-alpha.4: {}
+  timescope@0.0.0-alpha.5: {}
 
   tinyglobby@0.2.15:
     dependencies:

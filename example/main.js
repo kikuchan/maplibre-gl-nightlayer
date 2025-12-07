@@ -47,7 +47,4 @@ map.on('load', () => {
   });
 });
 
-timescope.on('change', () => {
-  if (!timescope.timeForAnimation) return nightLayer.setDate(null);
-  nightLayer.setTime(timescope.timeForAnimation);
-});
+timescope.on('timeanimating', (e) => nightLayer.setTime(e.value));

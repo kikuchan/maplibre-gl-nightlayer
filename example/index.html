@@ -5,7 +5,13 @@
   <title>NightLayer example</title>
   <script src="./main.js" type="module"></script>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=BIZ+UDGothic&display=swap" rel="stylesheet">
   <style>
+    :root {
+      background: radial-gradient(circle at 20% 20%, #0c1c3a, #040b16 45%);
+    }
     html, body {
       width: 100%;
       height: 100%;
@@ -16,39 +22,90 @@
       width: 100%;
       height: 100%;
     }
-    #timescope {
-      flex: none;
-      width: 100%;
-      border-top: 1px solid #ccc;
+
+    .popup {
+       background: #000c; backdrop-filter: blur(4px); border: 1px solid #888; border-radius: 4px; padding: 0.5em; color: white
     }
 
-    #container {
+    #timescope {
       width: 100%;
-      height: 100%;
+    }
+
+    #clock {
+      width: 8rem;
+      height: 4rem;
+      font-weight: bold;
+      text-align: center;
       display: flex;
       flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      cursor: pointer;
+
+      .ym {
+      }
+
+      .day {
+        font-size: 1.25rem;
+      }
+
+      .hm {
+        font-size: 1.25rem;
+      }
+
+    }
+
+    .controls {
+      display: flex;
+      flex-direction: column;
+
+      margin-left: 1rem;
+      button {
+        background: white;
+        outline: none;
+        border: none;
+        margin: 0.25rem;
+        width: 1.5rem;
+        height: 1.5rem;
+        font-size: 1rem;
+        font-weight: bold;
+        box-sizing: border-box;
+        cursor: pointer;
+      }
+    }
+
+    .maplibregl-ctrl-top-right {
+      top: 6.5rem !important;
+      right: 0.5rem !important;
     }
   </style>
 </head>
 <body>
-  <div id="container">
-    <div id="map"></div>
-    <div id="timescope"></div>
-  </div>
+  <div id="map"></div>
 
-  <div style="position: fixed; left: 1em; top: 1em; display: flex; gap: 0.5em; background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 0.5em;">
-    <button id="btn-nightlayer">Toggle NightLayer</button>
+  <div style="position: fixed; left: 1em; top: 1em; display: flex; gap: 0.25rem; right: 1em; align-items: center;" class="popup">
+    <div id="clock"></div>
+    <div id="timescope"></div>
+    <div class="controls">
+      <button id="btn-timescope-zoom-in">+</button>
+      <button id="btn-timescope-zoom-out">-</button>
+    </div>
+  </div>
+  <div style="position: fixed; left: 1em; bottom: 1em; display: flex; gap: 0.5em; flex-wrap: wrap;" class="popup">
+    <div>Shadow <button id="btn-nightlayer" style="white-space: nowrap">→ OFF</button></div>
     <div>
-      TwilightSteps:
-      <select id="sel-twilightstep">
-        <option value="0">None</option>
+      Twilights
+      <select id="sel-twilightstep" style="white-space: nowrap">
+        <option value="0">Gradation</option>
         <option value="1">1</option>
         <option value="2">2</option>
         <option value="3">3</option>
-        <option value="4">4</option>
+        <option value="4" selected>4</option>
       </select>
     </div>
-    <button id="btn-projection">Toggle Projection</button>
+    <div>
+    Map <button id="btn-projection" style="white-space: nowrap">→ Flat Earth</button>
+    </div>
   </div>
 </body>
 </html>

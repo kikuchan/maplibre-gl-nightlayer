@@ -34,16 +34,16 @@
   },
   "license": "MIT",
   "devDependencies": {
-    "@biomejs/biome": "^2.3.8",
+    "@biomejs/biome": "^2.3.10",
     "@fal-works/esbuild-plugin-global-externals": "^2.1.2",
-    "@kikuchan/decimal": "0.1.0-alpha.4",
-    "esbuild": "^0.27.1",
+    "@kikuchan/decimal": "0.1.0-alpha.5",
+    "esbuild": "^0.27.2",
     "gl-matrix": "^3.4.4",
-    "maplibre-gl": "5.14.0",
+    "maplibre-gl": "5.15.0",
     "typescript": "^5.9.3",
-    "vite": "^7.2.6"
+    "vite": "^7.3.0"
   },
-  "packageManager": "pnpm@10.24.0",
+  "packageManager": "pnpm@10.27.0",
   "pnpm": {
     "onlyBuiltDependencies": [
       "@biomejs/biome",

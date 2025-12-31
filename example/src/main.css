@@ -1,0 +1,76 @@
+:root {
+  background: radial-gradient(circle at 20% 20%, #0c1c3a, #040b16 45%);
+}
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+#app, #map {
+  width: 100%;
+  height: 100%;
+}
+
+.popup {
+   background: #000c; backdrop-filter: blur(4px); border: 1px solid #888; border-radius: 4px; padding: 0.5em; color: white
+}
+
+#timescope {
+  width: 100%;
+}
+
+#clock {
+  width: 7rem;
+  height: 4rem;
+  font-weight: bold;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  cursor: pointer;
+  flex: none;
+
+  color: yellow;
+  &.now {
+    color: white;
+  }
+
+  .ym {
+  }
+
+  .day {
+    font-size: 1.25rem;
+  }
+
+  .hm {
+    font-size: 1.25rem;
+  }
+
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+
+  margin-left: 1rem;
+  button {
+    background: white;
+    outline: none;
+    border: none;
+    margin: 0.25rem;
+    width: 1.5rem;
+    height: 1.5rem;
+    font-size: 1rem;
+    font-weight: bold;
+    box-sizing: border-box;
+    cursor: pointer;
+  }
+}
+
+.maplibregl-ctrl-top-right {
+  top: 6.5rem !important;
+  right: 0.5rem !important;
+}
+

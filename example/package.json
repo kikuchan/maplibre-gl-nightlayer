@@ -5,15 +5,17 @@
   "description": "",
   "main": "main.js",
   "scripts": {
-    "start": "vite",
+    "dev": "vite",
+    "build": "vite build",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "devDependencies": {
-    "maplibre-gl": "5.14.0",
-    "timescope": "0.0.0-alpha.5",
-    "vite": "^7.2.6"
+    "@luna_ui/luna": "^0.3.5",
+    "@timescope/luna": "0.0.0-alpha.9",
+    "maplibre-gl": "5.15.0",
+    "vite": "^7.3.0"
   }
 }

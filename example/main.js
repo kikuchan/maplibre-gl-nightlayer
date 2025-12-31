@@ -5,7 +5,26 @@ import { Timescope } from 'timescope';
 
 const map = new maplibregl.Map({
   container: 'map', // container id
-  style: 'https://demotiles.maplibre.org/style.json', // style URL
+  //style: 'https://demotiles.maplibre.org/style.json', // style URL
+  style: {
+    "version": 8,
+    "sources": {
+      "osm": {
+        "type": "raster",
+        "tiles": ["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        "tileSize": 256,
+        "attribution": "&copy; OpenStreetMap Contributors",
+        "maxzoom": 19
+      }
+    },
+    "layers": [
+      {
+        "id": "osm",
+        "type": "raster",
+        "source": "osm"
+      }
+    ]
+  },
   center: [135, 0], // starting position [lng, lat]
   zoom: 0, // starting zoom
 });

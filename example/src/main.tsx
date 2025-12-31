@@ -3,6 +3,7 @@ import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './main.css';
 import { NightLayer } from '../../src/main';
+import { Decimal as Decimal2 } from '@kikuchan/decimal';
 import { Decimal, Timescope } from '@timescope/luna';
 
 function Clock({ time, now, onclick }: any) {
@@ -34,6 +35,10 @@ function App() {
   const [twilights, setTwilights] = createSignal(4);
   const [visible, setVisible] = createSignal(true);
   const [flat, setFlat] = createSignal(false);
+
+  const [animating, setAnimating] = createSignal(false);
+  const [editing, setEditing] = createSignal(false);
+  const [now, setNow] = createSignal(Date.now());
 
   onMount(() => {
     const map = new maplibregl.Map({
@@ -89,15 +94,16 @@ function App() {
     });
 
     effect(() => {
+      const t = timeAnimating() ?? now() / 1000;;
+      nightLayer.setTime(Decimal2(t.toString()));
+    });
+
+    effect(() => {
       const type = flat() ? 'mercator' : 'globe';
       if (!ready) return;
       map.setProjection({ type });
     });
   });
-
-  const [animating, setAnimating] = createSignal(false);
-  const [editing, setEditing] = createSignal(false);
-  const [now, setNow] = createSignal(Date.now());
 
   setInterval(() => {
     if (animating() || editing()) return;

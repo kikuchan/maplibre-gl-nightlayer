@@ -3,8 +3,7 @@ import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './main.css';
 import { NightLayer } from '../../src/main';
-import { Decimal as Decimal2 } from '@kikuchan/decimal';
-import { Decimal, Timescope } from '@timescope/luna';
+import { Timescope, Decimal } from '@timescope/luna';
 
 function Clock({ time, now, onclick }: any) {
     const d = createMemo(() => new Date(time()?.mul(1000).number() ?? now()));
@@ -95,7 +94,7 @@ function App() {
 
     effect(() => {
       const t = timeAnimating() ?? now() / 1000;;
-      nightLayer.setTime(Decimal2(t.toString()));
+      nightLayer.setTime(t);
     });
 
     effect(() => {
@@ -118,29 +117,30 @@ function App() {
         <Timescope
           time={time}
           zoom={zoom}
-          height={() => '48px'}
-          timeRange={() => [undefined, undefined]}
+          height='48px'
+          timeRange={[undefined, undefined]}
           onTimeChanged={setTime}
           onTimeAnimating={setTimeAnimating}
           onAnimating={setAnimating}
           onEditing={setEditing}
 
-          background={() => 'transparent'}
-          tracks={() => ({
-          default: {
-            timeAxis: {
-              axis: {
-                color: 'white',
-              },
-              ticks: {
-                color: 'white',
-              },
-              labels: {
-                color: 'white',
-              },
-            }
-          },
-        })}/>
+          background='transparent'
+          tracks={{
+            default: {
+              timeAxis: {
+                axis: {
+                  color: 'white',
+                },
+                ticks: {
+                  color: 'white',
+                },
+                labels: {
+                  color: 'white',
+                },
+              }
+            },
+          }}
+        />
         <div class="controls">
           <button onclick={() => setZoom((z) => z + 1)}>+</button>
           <button onclick={() => setZoom((z) => z - 1)}>-</button>

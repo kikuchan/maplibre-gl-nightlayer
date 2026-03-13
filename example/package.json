@@ -13,9 +13,9 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
-    "@luna_ui/luna": "^0.3.5",
-    "@timescope/luna": "0.0.0-alpha.9",
-    "maplibre-gl": "5.15.0",
-    "vite": "^7.3.0"
+    "@luna_ui/luna": "^0.11.0",
+    "@timescope/luna": "0.0.0-alpha.11",
+    "maplibre-gl": "5.20.1",
+    "vite": "^8.0.0"
   }
 }

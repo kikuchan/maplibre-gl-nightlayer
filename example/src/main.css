@@ -1,5 +1,13 @@
 :root {
   background: radial-gradient(circle at 20% 20%, #0c1c3a, #040b16 45%);
+  font-family: 'BIZ UDGothic', system-ui, sans-serif;
+  color-scheme: dark;
+  --panel-inset: 1rem;
+  --time-panel-height: calc(5rem + 2px);
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
 }
 html,
 body {
@@ -15,16 +23,127 @@ body {
 }
 
 .popup {
-  background: #000c;
-  backdrop-filter: blur(4px);
-  border: 1px solid #888;
-  border-radius: 4px;
-  padding: 0.5em;
-  color: white;
+  background: rgb(10 18 32 / 88%);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 20%);
+  padding: 0.5rem;
+  color: #f1f5f9;
+  box-sizing: border-box;
+  z-index: 2;
+}
+
+.popup button,
+.popup select {
+  color: inherit;
+  font: inherit;
+}
+
+.popup button:focus-visible,
+.popup select:focus-visible {
+  outline: 2px solid #7dd3fc;
+  outline-offset: 3px;
+}
+
+.time-panel {
+  position: fixed;
+  top: calc(var(--safe-top) + var(--panel-inset));
+  left: calc(var(--safe-left) + var(--panel-inset));
+  right: calc(var(--safe-right) + var(--panel-inset));
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.display-controls {
+  position: fixed;
+  left: calc(var(--safe-left) + var(--panel-inset));
+  bottom: calc(var(--safe-bottom) + var(--panel-inset));
+  max-width: calc(100% - var(--safe-left) - var(--safe-right) - 2 * var(--panel-inset));
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  font-size: 0.875rem;
+
+  > div {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
+  button,
+  select {
+    min-height: 2rem;
+    border: 1px solid rgb(255 255 255 / 18%);
+    border-radius: 7px;
+    padding: 0.25rem 0.5rem;
+    background: rgb(255 255 255 / 9%);
+    cursor: pointer;
+  }
+
+  select {
+    min-width: 5rem;
+  }
+
+  option {
+    background: #101b2c;
+  }
 }
 
 #timescope {
   width: 100%;
+  min-width: 0;
+}
+
+.display-controls .toggle-switch {
+  display: grid;
+  place-items: center;
+  width: 3rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  flex: none;
+}
+
+.toggle-track {
+  position: relative;
+  display: block;
+  width: 2.75rem;
+  height: 1.5rem;
+  border-radius: 999px;
+  background: #475569;
+  transition: background-color 150ms ease;
+
+  &::after {
+    content: '';
+    position: absolute;
+    top: 0.1875rem;
+    left: 0.1875rem;
+    width: 1.125rem;
+    height: 1.125rem;
+    border-radius: 50%;
+    background: #f8fafc;
+    box-shadow: 0 1px 3px rgb(0 0 0 / 25%);
+    transition: transform 150ms ease;
+  }
+}
+
+.toggle-switch[aria-checked='true'] .toggle-track {
+  background: #0284c7;
+
+  &::after {
+    transform: translateX(1.25rem);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toggle-track,
+  .toggle-track::after {
+    transition: none;
+  }
 }
 
 #clock {
@@ -38,21 +157,32 @@ body {
   align-items: center;
   cursor: pointer;
   flex: none;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
 
-  color: yellow;
+  color: #fcd34d;
   &.now {
     color: white;
   }
 
-  .ym {
+  .day {
+    font-size: 1rem;
+    font-weight: 700;
   }
 
-  .day {
-    font-size: 1.25rem;
+  .ym {
+    font-size: 0.875rem;
+    opacity: 0.8;
   }
 
   .hm {
     font-size: 1.25rem;
+    font-weight: 700;
   }
 }
 
@@ -60,14 +190,14 @@ body {
   display: flex;
   flex-direction: column;
 
-  margin-left: 1rem;
+  gap: 0.25rem;
   button {
-    background: white;
-    outline: none;
-    border: none;
-    margin: 0.25rem;
-    width: 1.5rem;
-    height: 1.5rem;
+    background: rgb(255 255 255 / 9%);
+    border: 1px solid rgb(255 255 255 / 18%);
+    border-radius: 7px;
+    margin: 0;
+    width: 1.75rem;
+    height: 1.75rem;
     font-size: 1rem;
     font-weight: bold;
     box-sizing: border-box;
@@ -75,7 +205,131 @@ body {
   }
 }
 
+@media (hover: hover) {
+  .popup button:hover,
+  .display-controls select:hover {
+    background: rgb(255 255 255 / 16%);
+  }
+}
+
+.maplibregl-ctrl-group {
+  overflow: hidden;
+  border-radius: 10px;
+}
+
+.maplibregl-ctrl.maplibregl-ctrl-attrib {
+  background: rgb(10 18 32 / 88%);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 8px;
+  color: #f1f5f9;
+  box-shadow: 0 4px 12px rgb(0 0 0 / 15%);
+}
+
+.maplibregl-ctrl.maplibregl-ctrl-attrib a {
+  color: inherit;
+}
+
+.maplibregl-ctrl.maplibregl-ctrl-attrib a:hover {
+  color: #7dd3fc;
+}
+
+.maplibregl-ctrl.maplibregl-ctrl-attrib a:focus-visible {
+  outline: 2px solid #7dd3fc;
+  outline-offset: 2px;
+}
+
 .maplibregl-ctrl-top-right {
-  top: 6.5rem !important;
-  right: 0.5rem !important;
+  top: calc(var(--safe-top) + var(--panel-inset) + var(--time-panel-height) + 0.5rem);
+  right: var(--safe-right);
+}
+
+.maplibregl-ctrl-bottom-right {
+  bottom: calc(var(--safe-bottom) + var(--panel-inset));
+  right: calc(var(--safe-right) + var(--panel-inset));
+}
+
+.maplibregl-ctrl-bottom-right > .maplibregl-ctrl-attrib {
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  :root {
+    --panel-inset: 0.5rem;
+    --time-panel-height: calc(7.25rem + 2px);
+  }
+
+  .time-panel {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  #clock {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 0.5rem;
+    width: auto;
+    height: 2.75rem;
+
+    .day,
+    .hm {
+      font-size: 1rem;
+      white-space: nowrap;
+    }
+
+    .ym {
+      font-size: 0.875rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  .controls {
+    flex-direction: row;
+
+    button {
+      width: 2.75rem;
+      height: 2.75rem;
+    }
+  }
+
+  .display-controls {
+    bottom: calc(var(--safe-bottom) + var(--panel-inset) + 1.875rem);
+    right: calc(var(--safe-right) + var(--panel-inset));
+    max-height: 35dvh;
+    overflow-y: auto;
+    font-size: 1rem;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1fr);
+    gap: 0.5rem;
+
+    > div {
+      min-width: 0;
+      flex-direction: column;
+      gap: 0.25rem;
+      font-size: 0.75rem;
+    }
+
+    button,
+    select {
+      min-height: 2.75rem;
+    }
+
+    select {
+      width: 100%;
+      min-width: 0;
+      max-width: 7rem;
+      font-size: 1rem;
+    }
+
+    .toggle-switch {
+      height: 2.75rem;
+    }
+  }
+
+  .maplibregl-ctrl-group button {
+    width: 2.75rem;
+    height: 2.75rem;
+  }
 }

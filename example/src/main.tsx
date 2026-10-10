@@ -22,11 +22,17 @@ function Clock({ time, now, onclick }: { time: () => Decimal | null; now: () => 
   });
 
   return (
-    <div id="clock" class={() => (time() === null ? 'now' : '')} onclick={onclick}>
-      <div class="day">{() => `${months[Number(d().month()) - 1]} ${d().day()}`}</div>
-      <div class="ym">{() => d().format('g')}</div>
-      <div class="hm">{hm}</div>
-    </div>
+    <button
+      id="clock"
+      type="button"
+      aria-label="Return to current time"
+      class={() => (time() === null ? 'now' : '')}
+      onclick={onclick}
+    >
+      <span class="day">{() => `${months[Number(d().month()) - 1]} ${d().day()}`}</span>
+      <span class="ym">{() => d().format('g')}</span>
+      <span class="hm">{hm}</span>
+    </button>
   );
 }
 
@@ -71,7 +77,7 @@ function App() {
     });
     map.addControl(new maplibregl.NavigationControl());
     const attr = new maplibregl.AttributionControl({
-      compact: true,
+      compact: false,
     });
     map.addControl(attr);
 
@@ -84,7 +90,6 @@ function App() {
     map.on('load', () => {
       map.addLayer(nightLayer);
       setReady(true);
-      attr._toggleAttribution();
     });
 
     effect(() => {
@@ -115,10 +120,7 @@ function App() {
   return (
     <>
       <div id="map"></div>
-      <div
-        style="position: fixed; left: 1em; top: 1em; display: flex; gap: 0.25rem; right: 1em; align-items: center;"
-        class="popup"
-      >
+      <div class="popup time-panel">
         <Clock time={timeAnimating} now={now} onclick={() => setTime(null)} />
         <Timescope
           time={time}
@@ -153,35 +155,57 @@ function App() {
           }}
         />
         <div class="controls">
-          <button onclick={() => setZoom((z) => z + 1)}>+</button>
-          <button onclick={() => setZoom((z) => z - 1)}>-</button>
+          <button aria-label="Zoom in on timeline" onclick={() => setZoom((z) => z + 1)}>
+            +
+          </button>
+          <button aria-label="Zoom out on timeline" onclick={() => setZoom((z) => z - 1)}>
+            -
+          </button>
         </div>
       </div>
-      <div style="position: fixed; left: 1em; bottom: 1em; display: flex; gap: 0.5em; flex-wrap: wrap;" class="popup">
+      <div class="popup display-controls">
         <div>
-          Shadow{' '}
-          <button id="btn-nightlayer" style="white-space: nowrap" onclick={() => setVisible((v) => !v)}>
-            → {() => (visible() ? 'OFF' : 'ON')}
+          <span id="shadow-label">Shadow</span>
+          <button
+            id="btn-nightlayer"
+            type="button"
+            class="toggle-switch"
+            role="switch"
+            aria-labelledby="shadow-label"
+            aria-checked={visible}
+            onclick={() => setVisible((v) => !v)}
+          >
+            <span class="toggle-track" aria-hidden="true" />
           </button>
         </div>
         <div>
-          Twilights{' '}
+          <label for="twilight-steps">Twilights</label>
           <select
+            id="twilight-steps"
             value={twilights}
             onchange={(e: Event) => setTwilights(Number((e.currentTarget as HTMLSelectElement).value))}
-            style="white-space: nowrap"
           >
             <option value="0">Gradation</option>
             <option value="1">1</option>
             <option value="2">2</option>
             <option value="3">3</option>
-            <option value="4" selected>4</option>
+            <option value="4" selected>
+              4
+            </option>
           </select>
         </div>
         <div>
-          Map{' '}
-          <button id="btn-projection" style="white-space: nowrap" onclick={() => setFlat((v) => !v)}>
-            → {() => (flat() ? 'Globe' : 'Flat Earth')}
+          <span id="globe-label">Globe</span>
+          <button
+            id="btn-projection"
+            type="button"
+            class="toggle-switch"
+            role="switch"
+            aria-labelledby="globe-label"
+            aria-checked={() => !flat()}
+            onclick={() => setFlat((v) => !v)}
+          >
+            <span class="toggle-track" aria-hidden="true" />
           </button>
         </div>
       </div>

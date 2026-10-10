@@ -1,29 +1,33 @@
-import { createMemo, createSignal, effect, onMount, render } from "@luna_ui/luna";
-import maplibregl from 'maplibre-gl';
+import { createMemo, createSignal, effect, onMount, render } from '@luna_ui/luna';
+import * as maplibregl from 'maplibre-gl';
+import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './main.css';
 import { NightLayer } from '../../src/main';
-import { Timescope, Decimal } from '@timescope/luna';
+import { Timescope } from '@timescope/luna';
+import { Decimal, Calendar } from 'timescope';
 
-function Clock({ time, now, onclick }: any) {
-    const d = createMemo(() => new Date(time()?.mul(1000).number() ?? now()));
-    const m = new Intl.DateTimeFormat("en-US", {
-      'month': 'short',
-      'day': 'numeric',
-    });
-    const y = new Intl.DateTimeFormat("en-US", {
-      'year': 'numeric',
-    });
-    const hm = new Intl.DateTimeFormat("en-US", {
-      'hour': '2-digit',
-      'minute': '2-digit',
-    });
+maplibregl.setWorkerUrl(maplibreWorkerUrl);
 
-  return (<div id="clock" class={() => time() === null ? 'now' : ''} onclick={onclick}>
-    <div class="day">{() => m.format(d())}</div>
-    <div class="ym">{() => y.format(d())}</div>
-    <div class="hm">{() => hm.format(d())}</div>
-  </div>);
+const DATE_RANGE_SECONDS = 8_640_000_000_000;
+
+function Clock({ time, now, onclick }: { time: () => Decimal | null; now: () => number; onclick: () => void }) {
+  const d = createMemo(() => Calendar.fromEpoch(time() ?? Decimal(now()).div(1000)));
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const hm = createMemo(() => {
+    const calendar = d();
+    const hour = calendar.hour();
+    const hour12 = (hour % 12n || 12n).toString().padStart(2, '0');
+    return `${hour12}:${calendar.format('mm')} ${hour < 12n ? 'AM' : 'PM'}`;
+  });
+
+  return (
+    <div id="clock" class={() => (time() === null ? 'now' : '')} onclick={onclick}>
+      <div class="day">{() => `${months[Number(d().month()) - 1]} ${d().day()}`}</div>
+      <div class="ym">{() => d().format('g')}</div>
+      <div class="hm">{hm}</div>
+    </div>
+  );
 }
 
 function App() {
@@ -41,25 +45,25 @@ function App() {
 
   onMount(() => {
     const map = new maplibregl.Map({
-      container: 'map', // container id
+      container: 'map',
       style: {
         version: 8,
         sources: {
           osm: {
-            type: "raster",
-            tiles: ["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"],
+            type: 'raster',
+            tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png'],
             tileSize: 256,
-            attribution: "&copy; OpenStreetMap Contributors",
-            maxzoom: 19
-          }
+            attribution: '&copy; OpenStreetMap Contributors',
+            maxzoom: 19,
+          },
         },
         layers: [
           {
-            id: "osm",
-            type: "raster",
-            source: "osm"
-          }
-        ]
+            id: 'osm',
+            type: 'raster',
+            source: 'osm',
+          },
+        ],
       },
       center: [135, 35],
       zoom: 4,
@@ -68,7 +72,7 @@ function App() {
     map.addControl(new maplibregl.NavigationControl());
     const attr = new maplibregl.AttributionControl({
       compact: true,
-    })
+    });
     map.addControl(attr);
 
     const nightLayer = new NightLayer({
@@ -76,11 +80,10 @@ function App() {
       twilightSteps: 0,
     });
 
-    let ready = false;
+    const [ready, setReady] = createSignal(false);
     map.on('load', () => {
-      ready = true;
       map.addLayer(nightLayer);
-      map.setProjection({ type: 'globe' });
+      setReady(true);
       attr._toggleAttribution();
     });
 
@@ -93,13 +96,13 @@ function App() {
     });
 
     effect(() => {
-      const t = timeAnimating() ?? now() / 1000;;
-      nightLayer.setTime(t);
+      const t = timeAnimating();
+      nightLayer.setDate(t === null ? null : new Date(t.mul(1000).number()));
     });
 
     effect(() => {
       const type = flat() ? 'mercator' : 'globe';
-      if (!ready) return;
+      if (!ready()) return;
       map.setProjection({ type });
     });
   });
@@ -112,32 +115,40 @@ function App() {
   return (
     <>
       <div id="map"></div>
-      <div style="position: fixed; left: 1em; top: 1em; display: flex; gap: 0.25rem; right: 1em; align-items: center;" class="popup">
+      <div
+        style="position: fixed; left: 1em; top: 1em; display: flex; gap: 0.25rem; right: 1em; align-items: center;"
+        class="popup"
+      >
         <Clock time={timeAnimating} now={now} onclick={() => setTime(null)} />
         <Timescope
           time={time}
           zoom={zoom}
-          height='48px'
-          timeRange={[undefined, undefined]}
+          style="height: 48px; background: transparent;"
+          timeRange={[-DATE_RANGE_SECONDS, DATE_RANGE_SECONDS]}
+          zoomRange={[-35, 10]}
           onTimeChanged={setTime}
-          onTimeAnimating={setTimeAnimating}
+          onZoomChanged={setZoom}
+          onTimeAnimating={(value) => {
+            setTimeAnimating(value?.clamp(-DATE_RANGE_SECONDS, DATE_RANGE_SECONDS) ?? null);
+          }}
           onAnimating={setAnimating}
           onEditing={setEditing}
 
-          background='transparent'
-          tracks={{
-            default: {
-              timeAxis: {
-                axis: {
-                  color: 'white',
+          options={{
+            tracks: {
+              default: {
+                timeAxis: {
+                  axis: {
+                    color: 'white',
+                  },
+                  ticks: {
+                    color: 'white',
+                  },
+                  labels: {
+                    color: 'white',
+                  },
                 },
-                ticks: {
-                  color: 'white',
-                },
-                labels: {
-                  color: 'white',
-                },
-              }
+              },
             },
           }}
         />
@@ -147,9 +158,19 @@ function App() {
         </div>
       </div>
       <div style="position: fixed; left: 1em; bottom: 1em; display: flex; gap: 0.5em; flex-wrap: wrap;" class="popup">
-        <div>Shadow <button id="btn-nightlayer" style="white-space: nowrap" onclick={() => setVisible((v) => !v)}>→ {() => visible() ? 'OFF' : 'ON'}</button></div>
         <div>
-          Twilights <select onchange={(e: any) => setTwilights(Number(e.target.value))} style="white-space: nowrap">
+          Shadow{' '}
+          <button id="btn-nightlayer" style="white-space: nowrap" onclick={() => setVisible((v) => !v)}>
+            → {() => (visible() ? 'OFF' : 'ON')}
+          </button>
+        </div>
+        <div>
+          Twilights{' '}
+          <select
+            value={twilights}
+            onchange={(e: Event) => setTwilights(Number((e.currentTarget as HTMLSelectElement).value))}
+            style="white-space: nowrap"
+          >
             <option value="0">Gradation</option>
             <option value="1">1</option>
             <option value="2">2</option>
@@ -158,15 +179,17 @@ function App() {
           </select>
         </div>
         <div>
-        Map <button id="btn-projection" style="white-space: nowrap" onclick={() => setFlat((v) => !v)}>→ {() => flat() ? 'Globe' : 'Flat Earth'}</button>
+          Map{' '}
+          <button id="btn-projection" style="white-space: nowrap" onclick={() => setFlat((v) => !v)}>
+            → {() => (flat() ? 'Globe' : 'Flat Earth')}
+          </button>
         </div>
       </div>
     </>
   );
 }
 
-const app = document.getElementById("app");
+const app = document.getElementById('app');
 if (app) {
   render(app, <App />);
 }
-

@@ -3,7 +3,14 @@ name: Build and Release
 on:
   push:
     tags:
-      - v**
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-and-release:
@@ -15,35 +22,45 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set Tag Name
-        id: set_tag
-        run: echo "tag_name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v5
+        uses: pnpm/setup@v3
         with:
-          node-version: 23
+          install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-          cache: pnpm
+          package-manager-cache: false
 
-      - run: npm install -g npm@latest
+      - name: Update npm
+        run: npm install --global npm@latest
 
-      - run: pnpm i --frozen-lockfile --strict-peer-dependencies
-      - run: pnpm build
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --strict-peer-dependencies
 
-      - run: npm publish --access public --tag latest
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Check formatting
+        run: pnpm run format
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Publish to npm
+        run: npm publish --access public --tag latest
 
       - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.set_tag.outputs.tag_name }}
-          release_name: ${{ steps.set_tag.outputs.tag_name }}
-          draft: false
-          prerelease: false
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

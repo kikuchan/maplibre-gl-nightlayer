@@ -1,7 +1,5 @@
-import { Decimal } from '@kikuchan/decimal';
 import { MercatorCoordinate, createTileMesh } from 'maplibre-gl';
 import type { CustomLayerInterface, CustomRenderMethodInput, Map as MaplibreMap, TileMesh } from 'maplibre-gl';
-import type { mat4 } from 'gl-matrix';
 
 function radians(deg: number) {
   return (deg * Math.PI) / 180;
@@ -9,83 +7,6 @@ function radians(deg: number) {
 
 function degrees(rad: number) {
   return (rad / Math.PI) * 180;
-}
-
-const SECONDS_PER_DAY = 86400n;
-const DAYS_0000_TO_1970 = 719528n;
-const DAYS_PER_400_YEARS = 146097n;
-
-function floorDiv(a: bigint, b: bigint) {
-  const q = a / b;
-  const r = a % b;
-  return r !== 0n && ((a < 0n) !== (b < 0n)) ? q - 1n : q;
-}
-
-function floorMod(a: bigint, b: bigint) {
-  return a - floorDiv(a, b) * b;
-}
-
-function isLeapYear(year: bigint) {
-  if (year % 4n !== 0n) return false;
-  if (year % 100n !== 0n) return true;
-  return year % 400n === 0n;
-}
-
-function unixToCalendar(unixSeconds: Decimal) {
-  const wholeSecondsDecimal = unixSeconds.floor(0);
-  const wholeSeconds = wholeSecondsDecimal.integer();
-  const fractionalSecond = unixSeconds.sub(wholeSecondsDecimal);
-
-  const epochDay = floorDiv(wholeSeconds, SECONDS_PER_DAY);
-  const secondsOfDay = floorMod(wholeSeconds, SECONDS_PER_DAY);
-
-  let zeroDay = epochDay + DAYS_0000_TO_1970;
-  zeroDay -= 60n;
-
-  const era = floorDiv(zeroDay, DAYS_PER_400_YEARS);
-  const dayOfEra = zeroDay - era * DAYS_PER_400_YEARS;
-  const yearOfEra = floorDiv(
-    dayOfEra - dayOfEra / 1460n + dayOfEra / 36524n - dayOfEra / 146096n,
-    365n,
-  );
-
-  let year = yearOfEra + era * 400n;
-  const dayOfYearMarchBased = dayOfEra - (365n * yearOfEra + yearOfEra / 4n - yearOfEra / 100n);
-  const marchMonth = (5n * dayOfYearMarchBased + 2n) / 153n;
-  const day = dayOfYearMarchBased - (153n * marchMonth + 2n) / 5n + 1n;
-  let month = marchMonth + 3n;
-
-  if (month > 12n) {
-    month -= 12n;
-    year += 1n;
-  }
-
-  const monthLengths = [
-    31n,
-    isLeapYear(year) ? 29n : 28n,
-    31n,
-    30n,
-    31n,
-    30n,
-    31n,
-    31n,
-    30n,
-    31n,
-    30n,
-    31n,
-  ];
-
-  let dayOfYear = day;
-  for (let i = 0; i < Number(month) - 1; i += 1) {
-    dayOfYear += monthLengths[i];
-  }
-
-  const secondsOfDayDecimal = Decimal(secondsOfDay.toString()).add(fractionalSecond);
-
-  return {
-    dayOfYear,
-    secondsOfDayDecimal,
-  };
 }
 
 function premultiplyAlpha(c: number[]) {
@@ -98,14 +19,18 @@ function premultiplyAlpha(c: number[]) {
  * @param date If null, the current date is used.
  * @returns The subsolar point.
  */
-export function getSubsolarPoint(date?: Decimal | null) {
-  if (date == null) date = Decimal(Date.now() / 1000);
+export function getSubsolarPoint(date?: Date | null): { lng: number; lat: number } {
+  date ??= new Date();
+  if (!Number.isFinite(date.getTime())) throw new RangeError('Invalid date');
 
   // based on https://en.wikipedia.org/wiki/Equation_of_time#Alternative_calculation
-  const { dayOfYear, secondsOfDayDecimal } = unixToCalendar(date);
-  const D = Decimal(dayOfYear.toString())
-    .add(secondsOfDayDecimal.div(86400))
-    .number();
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth();
+  const leapDay = month > 1 && year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 1 : 0;
+  const dayOfYear = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334][month] + date.getUTCDate() + leapDay;
+  const UTC =
+    date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600 + date.getUTCMilliseconds() / 3600000;
+  const D = dayOfYear + UTC / 24;
   const n = (2 * Math.PI) / 365.24;
 
   const e = radians(23.44); // Earth's axial tilt
@@ -116,8 +41,6 @@ export function getSubsolarPoint(date?: Decimal | null) {
   const C = (A - Math.atan2(Math.sin(B), Math.cos(B) * Math.cos(e))) / Math.PI;
 
   const EOT = 720 * (C - Math.trunc(C + 0.5));
-
-  const UTC = secondsOfDayDecimal.div(3600).number();
 
   const lng = -15 * (UTC - 12 + EOT / 60);
   const lat = degrees(Math.asin(Math.sin(-e) * Math.cos(B)));
@@ -190,7 +113,7 @@ export class NightLayer implements CustomLayerInterface {
   type = 'custom' as const;
   renderingMode = '2d' as const;
 
-  #date!: Decimal | null;
+  #date!: Date | null;
   #opacity: number;
   #color!: Color4;
   #daytimeColor!: Color4;
@@ -226,7 +149,7 @@ export class NightLayer implements CustomLayerInterface {
   }
 
   #setIntervalTimer() {
-    const activate = this.#date === null;
+    const activate = this.#map !== undefined && this.#date === null;
     if (this.#updateIntervalTimer) {
       clearInterval(this.#updateIntervalTimer);
       this.#updateIntervalTimer = undefined;
@@ -240,7 +163,7 @@ export class NightLayer implements CustomLayerInterface {
    * Get the current subsolar point (longitude and latitude)
    * @returns The subsolar point.
    */
-  getSubsolarPoint() {
+  getSubsolarPoint(): { lng: number; lat: number } {
     return getSubsolarPoint(this.#date);
   }
 
@@ -248,25 +171,17 @@ export class NightLayer implements CustomLayerInterface {
    * Get the date for the shadow.
    * @returns The date. If null, the current date is used.
    */
-  getDate() {
-    return this.#date ? new Date(this.#date.mul(1000).number()) : null;
-  }
-
-  getTime() {
-    return this.#date;
+  getDate(): Date | null {
+    return this.#date ? new Date(this.#date.getTime()) : null;
   }
 
   /**
    * Set the date for the shadow.
    * @param date If null, the current date is used.
    */
-  setDate(date: Date | null) {
-    this.setTime(date);
-  }
-
-  setTime(date: Date | null | number | Decimal) {
-    if (date instanceof Date) date = Decimal(date.getTime()).div(1000);
-    this.#date = Decimal(date);
+  setDate(date: Date | null): void {
+    if (date !== null && !Number.isFinite(date.getTime())) throw new RangeError('Invalid date');
+    this.#date = date === null ? null : new Date(date.getTime());
     this.#setIntervalTimer();
     this.#map?.triggerRepaint();
   }
@@ -275,7 +190,7 @@ export class NightLayer implements CustomLayerInterface {
    * Get the opacity of the shadow.
    * @returns The opacity. 0.0 means fully transparent, 1.0 means fully opaque.
    */
-  getOpacity() {
+  getOpacity(): number {
     return this.#opacity;
   }
 
@@ -283,7 +198,7 @@ export class NightLayer implements CustomLayerInterface {
    * Set the opacity of the shadow.
    * @param opacity 0.0 means fully transparent, 1.0 means fully opaque.
    */
-  setOpacity(opacity: number) {
+  setOpacity(opacity: number): void {
     this.#opacity = opacity;
     this.#map?.triggerRepaint();
   }
@@ -292,7 +207,7 @@ export class NightLayer implements CustomLayerInterface {
    * Get the color of the shadow.
    * @returns The color. Each value is in the range [0, 255].
    */
-  getColor() {
+  getColor(): Color4 {
     return this.#color;
   }
 
@@ -300,7 +215,7 @@ export class NightLayer implements CustomLayerInterface {
    * Set the color of the shadow.
    * @param color Each value should be in the range [0, 255].
    */
-  setColor(color: Color) {
+  setColor(color: Color): void {
     this.#color = [...(color.slice(0, 3) as Color3), color?.[3] ?? 255];
     this.#map?.triggerRepaint();
   }
@@ -309,7 +224,7 @@ export class NightLayer implements CustomLayerInterface {
    * Get the color of the daytime.
    * @returns The color [r, g, b, a]. Each value is in the range [0, 255].
    */
-  getDaytimeColor() {
+  getDaytimeColor(): Color4 {
     return this.#daytimeColor;
   }
 
@@ -317,7 +232,7 @@ export class NightLayer implements CustomLayerInterface {
    * Set the color of the daytime.
    * @param color Each value should be in the range [0, 255].
    */
-  setDaytimeColor(color: Color) {
+  setDaytimeColor(color: Color): void {
     this.#daytimeColor = [...(color.slice(0, 3) as Color3), color?.[3] ?? 255];
     this.#map?.triggerRepaint();
   }
@@ -326,7 +241,7 @@ export class NightLayer implements CustomLayerInterface {
    * Get the number of twilight steps.
    * @returns The steps. 0 means no steps (gradation), 1 means one step (day/night), etc.
    */
-  getTwilightSteps() {
+  getTwilightSteps(): number {
     return this.#twilightSteps;
   }
 
@@ -334,7 +249,7 @@ export class NightLayer implements CustomLayerInterface {
    * Set the number of twilight steps.
    * @param steps 0 means no steps (gradation), 1 means one step (day/night), etc.
    */
-  setTwilightSteps(steps: number) {
+  setTwilightSteps(steps: number): void {
     this.#twilightSteps = steps;
     this.#map?.triggerRepaint();
   }
@@ -343,7 +258,7 @@ export class NightLayer implements CustomLayerInterface {
    * Get the attenuation factor for each twilight step.
    * @returns The attenuation. 0.0 means no attenuation, 1.0 means full attenuation.
    */
-  getTwilightAttenuation() {
+  getTwilightAttenuation(): number {
     return this.#twilightAttenuation;
   }
 
@@ -351,7 +266,7 @@ export class NightLayer implements CustomLayerInterface {
    * Set the attenuation factor for each twilight step.
    * @param attenuation 0.0 means no attenuation, 1.0 means full attenuation.
    */
-  setTwilightAttenuation(attenuation: number) {
+  setTwilightAttenuation(attenuation: number): void {
     this.#twilightAttenuation = attenuation;
     this.#map?.triggerRepaint();
   }
@@ -360,7 +275,7 @@ export class NightLayer implements CustomLayerInterface {
    * Get the update interval.
    * @returns The interval in milliseconds.
    */
-  getUpdateInterval() {
+  getUpdateInterval(): number {
     return this.#updateInterval;
   }
 
@@ -368,51 +283,51 @@ export class NightLayer implements CustomLayerInterface {
    * Set the update interval.
    * @param interval The interval in milliseconds..
    */
-  setUpdateInterval(interval: number) {
+  setUpdateInterval(interval: number): void {
     this.#updateInterval = interval;
     this.#setIntervalTimer();
   }
 
-  onAdd(map: MaplibreMap, gl: WebGLRenderingContext | WebGL2RenderingContext) {
+  onAdd(map: MaplibreMap, gl: WebGLRenderingContext | WebGL2RenderingContext): void {
     this.#programCache = new Map();
     this.#vbo = gl.createBuffer()!;
     this.#ibo = gl.createBuffer()!;
     this.#map = map;
+    this.#modelSignature = undefined;
+    this.#indices = undefined;
+    this.#setIntervalTimer();
   }
 
-  onRemove() {
+  onRemove(_map: MaplibreMap, gl: WebGLRenderingContext | WebGL2RenderingContext): void {
+    if (this.#updateIntervalTimer !== undefined) {
+      clearInterval(this.#updateIntervalTimer);
+      this.#updateIntervalTimer = undefined;
+    }
+    if (this.#programCache) {
+      for (const program of this.#programCache.values()) gl.deleteProgram(program);
+    }
+    if (this.#vbo) gl.deleteBuffer(this.#vbo);
+    if (this.#ibo) gl.deleteBuffer(this.#ibo);
     this.#programCache = undefined;
     this.#map = undefined;
     this.#vbo = undefined;
     this.#ibo = undefined;
+    this.#modelSignature = undefined;
+    this.#indices = undefined;
   }
 
   #createProgram(
     gl: WebGLRenderingContext | WebGL2RenderingContext,
-    shaderData: { vertexShaderPrelude?: string; define?: string },
+    shaderData: CustomRenderMethodInput['shaderData'],
   ) {
-    const isV4 = !shaderData.vertexShaderPrelude;
-
     const vertexSource = `#version 300 es
       precision highp float;
 
       in vec2 a_position;
       out vec2 v_position;
 
-${
-  isV4
-    ? `
-      uniform mat4 u_matrix;
-
-      vec4 projectTile(vec2 pos) {
-        return u_matrix * vec4(pos, 0., 1.);
-      }
-`
-    : `
       ${shaderData.vertexShaderPrelude}
       ${shaderData.define}
-`
-}
 
       void main() {
         gl_Position = projectTile(a_position);
@@ -474,21 +389,40 @@ ${
 
     const vertexShader = gl.createShader(gl.VERTEX_SHADER);
     if (!vertexShader) throw new Error('failed to create vertex shader');
-    gl.shaderSource(vertexShader, vertexSource);
-    gl.compileShader(vertexShader);
-
     const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
-    if (!fragmentShader) throw new Error('failed to create fragment shader');
-    gl.shaderSource(fragmentShader, fragmentSource);
-    gl.compileShader(fragmentShader);
+    if (!fragmentShader) {
+      gl.deleteShader(vertexShader);
+      throw new Error('failed to create fragment shader');
+    }
 
-    const program = gl.createProgram()!;
-    if (!program) throw new Error('failed to create program');
-    gl.attachShader(program, vertexShader);
-    gl.attachShader(program, fragmentShader);
-    gl.linkProgram(program);
+    let program: WebGLProgram | null = null;
+    try {
+      gl.shaderSource(vertexShader, vertexSource);
+      gl.compileShader(vertexShader);
+      gl.shaderSource(fragmentShader, fragmentSource);
+      gl.compileShader(fragmentShader);
 
-    return program;
+      program = gl.createProgram();
+      if (!program) throw new Error('failed to create program');
+      gl.attachShader(program, vertexShader);
+      gl.attachShader(program, fragmentShader);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(gl.getProgramInfoLog(program) || 'failed to link program');
+      }
+      return program;
+    } catch (error) {
+      if (program) gl.deleteProgram(program);
+      program = null;
+      throw error;
+    } finally {
+      if (program) {
+        gl.detachShader(program, vertexShader);
+        gl.detachShader(program, fragmentShader);
+      }
+      gl.deleteShader(vertexShader);
+      gl.deleteShader(fragmentShader);
+    }
   }
 
   #updateModel(gl: WebGLRenderingContext | WebGL2RenderingContext) {
@@ -539,27 +473,14 @@ ${
     this.#modelSignature = modelSignature;
   }
 
-  // v4 interface
-  render(gl: WebGLRenderingContext | WebGL2RenderingContext, matrix: mat4, options: CustomRenderMethodInput): void;
-  // v5 interface
-  render(gl: WebGLRenderingContext | WebGL2RenderingContext, options: CustomRenderMethodInput): void;
-  render(
-    gl: WebGLRenderingContext | WebGL2RenderingContext,
-    matrix: mat4 | CustomRenderMethodInput,
-    options?: CustomRenderMethodInput,
-  ) {
-    if (!options) {
-      // v5 interface
-      options = matrix as CustomRenderMethodInput;
-    }
-
+  render(gl: WebGLRenderingContext | WebGL2RenderingContext, options: CustomRenderMethodInput): void {
     if (!this.#programCache) return;
     if (!this.#vbo) return;
     if (!this.#ibo) return;
     if (!this.#map) return;
 
-    const shaderData = options.shaderData || {};
-    const programKey = shaderData.variantName || 'default';
+    const shaderData = options.shaderData;
+    const programKey = shaderData.variantName;
     if (!this.#programCache.has(programKey)) {
       this.#programCache.set(programKey, this.#createProgram(gl, shaderData));
     }
@@ -577,31 +498,19 @@ ${
     gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_steps'), this.#twilightSteps);
     gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_attenuation'), this.#twilightAttenuation);
 
-    if ('getProjectionDataForCustomLayer' in this.#map.transform) {
-      // v5 interface
-      const projectionData = this.#map.transform.getProjectionDataForCustomLayer(true);
-
-      // The magic: based on test/examples/globe-custom-simple.html
-      gl.uniformMatrix4fv(
-        gl.getUniformLocation(program, 'u_projection_fallback_matrix'),
-        false,
-        projectionData.fallbackMatrix, // convert mat4 from gl-matrix to a plain array
-      );
-      gl.uniformMatrix4fv(
-        gl.getUniformLocation(program, 'u_projection_matrix'),
-        false,
-        projectionData.mainMatrix, // convert mat4 from gl-matrix to a plain array
-      );
-      gl.uniform4f(
-        gl.getUniformLocation(program, 'u_projection_tile_mercator_coords'),
-        ...projectionData.tileMercatorCoords,
-      );
-      gl.uniform4f(gl.getUniformLocation(program, 'u_projection_clipping_plane'), ...projectionData.clippingPlane);
-      gl.uniform1f(gl.getUniformLocation(program, 'u_projection_transition'), projectionData.projectionTransition);
-    } else {
-      // v4 interface
-      gl.uniformMatrix4fv(gl.getUniformLocation(program, 'u_matrix'), false, matrix as mat4);
-    }
+    const projectionData = options.defaultProjectionData;
+    gl.uniformMatrix4fv(
+      gl.getUniformLocation(program, 'u_projection_fallback_matrix'),
+      false,
+      projectionData.fallbackMatrix,
+    );
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'u_projection_matrix'), false, projectionData.mainMatrix);
+    gl.uniform4fv(
+      gl.getUniformLocation(program, 'u_projection_tile_mercator_coords'),
+      projectionData.tileMercatorCoords,
+    );
+    gl.uniform4fv(gl.getUniformLocation(program, 'u_projection_clipping_plane'), projectionData.clippingPlane);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_projection_transition'), projectionData.projectionTransition);
 
     this.#updateModel(gl);
 

@@ -10,15 +10,11 @@
     "dist/"
   ],
   "scripts": {
-    "dev": "vite example",
-    "build": "node ./build.mjs && pnpm run build:types",
-    "build:types": "tsc --declaration --emitDeclarationOnly --declarationDir './dist'",
-    "build:example": "vite build example",
-    "lint": "biome lint ./src",
-    "lint:fix": "biome lint ./src --write",
-    "format": "biome format ./src",
-    "format:fix": "biome format ./src --write",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint ./src tsdown.config.ts",
+    "format": "oxfmt --check ./src tsdown.config.ts",
+    "format:fix": "oxfmt --write ./src tsdown.config.ts"
   },
   "keywords": [
     "maplibre",
@@ -34,24 +30,14 @@
   },
   "license": "MIT",
   "devDependencies": {
-    "@biomejs/biome": "^2.4.6",
-    "@fal-works/esbuild-plugin-global-externals": "^2.1.2",
-    "@kikuchan/decimal": "^0.1.0-alpha.8",
-    "esbuild": "^0.27.4",
-    "gl-matrix": "^3.4.4",
-    "maplibre-gl": "^5.20.1",
-    "typescript": "^5.9.3",
-    "vite": "^8.0.0"
+    "maplibre-gl": "^6.13.0",
+    "oxfmt": "^0.72.0",
+    "oxlint": "^1.87.0",
+    "tsdown": "^0.23.0",
+    "typescript": "^7.0.2"
   },
   "peerDependencies": {
-    "@kikuchan/decimal": "^0.1.0-alpha.8",
-    "maplibre-gl": "^5.20.1"
+    "maplibre-gl": "^6.13.0"
   },
-  "packageManager": "pnpm@10.32.1",
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "@biomejs/biome",
-      "esbuild"
-    ]
-  }
+  "packageManager": "pnpm@12.10.1"
 }

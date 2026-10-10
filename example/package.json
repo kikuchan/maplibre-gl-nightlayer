@@ -7,15 +7,18 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "devDependencies": {
-    "@luna_ui/luna": "^0.11.0",
-    "@timescope/luna": "0.0.0-alpha.11",
-    "maplibre-gl": "5.20.1",
-    "vite": "^8.0.0"
+    "@kikuchan/decimal": "^0.2.0",
+    "@luna_ui/luna": "^0.23.2",
+    "@timescope/luna": "^0.1.1",
+    "maplibre-gl": "^6.13.0",
+    "timescope": "^0.1.4",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
   }
 }

@@ -1,0 +1,3 @@
+minimumReleaseAgeExclude:
+  - '@timescope/luna@0.1.1'
+  - timescope@0.1.4

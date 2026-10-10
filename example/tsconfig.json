@@ -3,6 +3,7 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "types": ["vite/client"],
     "jsx": "react-jsx",
     "jsxImportSource": "@luna_ui/luna",
     "strict": true,

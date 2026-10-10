@@ -22,15 +22,17 @@ map.on('load', () => {
     date: null,
     opacity: 0.5,
     color: [0, 0, 0, 255],
-    daytimeColor: [0, 0, 0, 0], // transparent
+    daytimeColor: [0, 0, 0, 0],
     twilightSteps: 0,
     twilightAttenuation: 0.5,
-    updateInterval: 10000, // in milliseconds
+    updateInterval: 10000,
   }));
 });
 ```
 
 ### via CDN
+
+Load MapLibre GL JS first so that `maplibregl` is available globally.
 
 ```html
 <script src="https://unpkg.com/maplibre-gl-nightlayer@latest/dist/nightlayer.min.js"></script>
@@ -56,6 +58,7 @@ type Options = {
   daytimeColor?: Color;
   twilightSteps?: number;
   twilightAttenuation?: number;
+  updateInterval?: number;
 };
 
 export class NightLayer implements CustomLayerInterface {
@@ -90,7 +93,7 @@ export class NightLayer implements CustomLayerInterface {
     :
 };
 
-export function getSubsolarPoint(date?: Date): {
+export function getSubsolarPoint(date?: Date | null): {
   lng: number;
   lat: number;
 };

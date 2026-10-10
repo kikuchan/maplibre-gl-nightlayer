@@ -1,19 +1,26 @@
 :root {
   background: radial-gradient(circle at 20% 20%, #0c1c3a, #040b16 45%);
 }
-html, body {
+html,
+body {
   width: 100%;
   height: 100%;
   margin: 0;
   padding: 0;
 }
-#app, #map {
+#app,
+#map {
   width: 100%;
   height: 100%;
 }
 
 .popup {
-   background: #000c; backdrop-filter: blur(4px); border: 1px solid #888; border-radius: 4px; padding: 0.5em; color: white
+  background: #000c;
+  backdrop-filter: blur(4px);
+  border: 1px solid #888;
+  border-radius: 4px;
+  padding: 0.5em;
+  color: white;
 }
 
 #timescope {
@@ -47,7 +54,6 @@ html, body {
   .hm {
     font-size: 1.25rem;
   }
-
 }
 
 .controls {
@@ -73,4 +79,3 @@ html, body {
   top: 6.5rem !important;
   right: 0.5rem !important;
 }
-

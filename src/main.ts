@@ -1,5 +1,9 @@
-import { MercatorCoordinate, createTileMesh } from 'maplibre-gl';
-import type { CustomLayerInterface, CustomRenderMethodInput, Map as MaplibreMap, TileMesh } from 'maplibre-gl';
+import { createTileMesh } from 'maplibre-gl';
+import type { CustomLayerInterface, CustomRenderMethodInput, Map as MaplibreMap } from 'maplibre-gl';
+
+type Mesh = { vertices: WebGLBuffer; indices: WebGLBuffer; count: number };
+
+const TWILIGHT_THRESHOLD_SINES = Array.from({ length: 15 }, (_, i) => Math.sin(radians(i === 0 ? -0.8333333 : -6 * i)));
 
 function radians(deg: number) {
   return (deg * Math.PI) / 180;
@@ -125,12 +129,8 @@ export class NightLayer implements CustomLayerInterface {
   #twilightAttenuation: number;
 
   #programCache?: Map<string, WebGLProgram>;
+  #meshCache?: Map<string, Mesh>;
   #map?: MaplibreMap;
-  #vbo?: WebGLBuffer;
-  #ibo?: WebGLBuffer;
-  #indices?: number;
-
-  #modelSignature?: string;
 
   /**
    * Create a new NightLayer instance. Intended to be passed to `map.addLayer`.
@@ -288,13 +288,10 @@ export class NightLayer implements CustomLayerInterface {
     this.#setIntervalTimer();
   }
 
-  onAdd(map: MaplibreMap, gl: WebGLRenderingContext | WebGL2RenderingContext): void {
+  onAdd(map: MaplibreMap, _gl: WebGLRenderingContext | WebGL2RenderingContext): void {
     this.#programCache = new Map();
-    this.#vbo = gl.createBuffer()!;
-    this.#ibo = gl.createBuffer()!;
+    this.#meshCache = new Map();
     this.#map = map;
-    this.#modelSignature = undefined;
-    this.#indices = undefined;
     this.#setIntervalTimer();
   }
 
@@ -306,14 +303,15 @@ export class NightLayer implements CustomLayerInterface {
     if (this.#programCache) {
       for (const program of this.#programCache.values()) gl.deleteProgram(program);
     }
-    if (this.#vbo) gl.deleteBuffer(this.#vbo);
-    if (this.#ibo) gl.deleteBuffer(this.#ibo);
+    if (this.#meshCache) {
+      for (const mesh of this.#meshCache.values()) {
+        gl.deleteBuffer(mesh.vertices);
+        gl.deleteBuffer(mesh.indices);
+      }
+    }
     this.#programCache = undefined;
+    this.#meshCache = undefined;
     this.#map = undefined;
-    this.#vbo = undefined;
-    this.#ibo = undefined;
-    this.#modelSignature = undefined;
-    this.#indices = undefined;
   }
 
   #createProgram(
@@ -325,13 +323,15 @@ export class NightLayer implements CustomLayerInterface {
 
       in vec2 a_position;
       out vec2 v_position;
+      out float v_pole;
 
       ${shaderData.vertexShaderPrelude}
       ${shaderData.define}
 
       void main() {
-        gl_Position = projectTile(a_position);
-        v_position = a_position;
+        gl_Position = projectTile(a_position, a_position);
+        v_position = vec2(a_position.x, clamp(a_position.y, 0.0, 8192.0)) / 8192.0 - 0.5;
+        v_pole = a_position.y < -32767.5 ? 1.0 : (a_position.y > 32766.5 ? -1.0 : 0.0);
       }
 `;
 
@@ -339,49 +339,64 @@ export class NightLayer implements CustomLayerInterface {
       precision highp float;
 
       in vec2 v_position;
+      in float v_pole;
       out vec4 fragColor;
 
-      uniform vec2 u_subsolar;
+      uniform vec4 u_tile; // exp(mercator latitude), sin(latitude), cos(latitude), tile size
+      uniform vec3 u_sun; // sin(solar latitude), cos(solar latitude) * cos/sin(relative longitude)
+      uniform float u_center_height;
+      uniform float u_thresholds[15];
       uniform float u_opacity;
       uniform float u_twilight_steps;
       uniform float u_twilight_attenuation;
       uniform vec4 u_daytime_color;
       uniform vec4 u_night_color;
 
-      vec2 mercatorToLngLat(vec2 mercator) {
-        // 0 <= x <= 1, 0 <= y <= 1
-        float x = mercator.x;
-        float y = mercator.y;
-
-        float lng = x * 360.0 - 180.0;
-        float lat = degrees(2.0 * atan(exp(${Math.PI} * (1.0 - 2.0 * y))) - ${Math.PI / 2});
-
-        return vec2(lng, lat);
+      float expMinusOne(float x) {
+        if (abs(x) < 0.001) return x * (1.0 + x * (0.5 + x * (1.0 / 6.0 + x / 24.0)));
+        return exp(x) - 1.0;
       }
 
       void main() {
-        vec2 lnglat = mercatorToLngLat(v_position);
+        // Work with small tile-local differences, not rounded global coordinates.
+        float longitudeDelta = v_position.x * u_tile.w * ${2 * Math.PI};
+        float e = expMinusOne(-v_position.y * u_tile.w * ${2 * Math.PI});
+        float t = u_tile.x;
+        float denominator = t * t + 1.0;
+        float deltaSquared = t * t * e * (2.0 + e);
+        float product = denominator * (denominator + deltaSquared);
+        float sinDelta = 2.0 * deltaSquared / product;
+        float cosDelta = 2.0 * t * (e * denominator - deltaSquared) / product;
 
-        vec2 observer = radians(lnglat);
-        vec2 subsolar = radians(u_subsolar);
-        float A = sin(observer.y) * sin(subsolar.y);
-        float B = cos(observer.y) * cos(subsolar.y) * cos(subsolar.x - observer.x);
-        float altitude = degrees(asin(A + B));
+        float poleAngle = v_pole * ${radians(90 - 85.0511287798066)};
+        float poleCosDelta = -2.0 * pow(sin(poleAngle * 0.5), 2.0);
+        float poleSin = sin(poleAngle);
+        float latitudeSin = u_tile.y + sinDelta;
+        float latitudeCos = u_tile.z + cosDelta;
+        sinDelta += latitudeSin * poleCosDelta + latitudeCos * poleSin;
+        cosDelta += latitudeCos * poleCosDelta - latitudeSin * poleSin;
+        latitudeCos = u_tile.z + cosDelta;
 
+        float longitudeCosDelta = -2.0 * pow(sin(longitudeDelta * 0.5), 2.0);
+        float heightDelta = u_sun.x * sinDelta + u_sun.y * cosDelta
+          + latitudeCos * (u_sun.y * longitudeCosDelta + u_sun.z * sin(longitudeDelta));
         float twilightStepAngle = 6.0;
-        float twilightBegins = -0.8333333;
         float twilightSteps = u_twilight_steps;
 
         // Attenuation for each twilightStepAngle
         float att = u_twilight_attenuation;
-        float twilightLevel = -altitude / twilightStepAngle;
+        float twilightLevel;
         if (twilightSteps > 0.) {
-          twilightLevel = ceil(clamp(twilightLevel, 0., twilightSteps));
-
-          if (altitude > twilightBegins) {
-            // XXX: Adjust for sunset/sunrise line
-            twilightLevel = 0.;
+          // Threshold residuals are computed in float64 on the CPU before upload.
+          twilightLevel = 1.0;
+          for (int i = 1; i < 15; i++) {
+            if (u_thresholds[i] + heightDelta < 0.0) twilightLevel += 1.0;
           }
+          twilightLevel = ceil(min(twilightLevel, twilightSteps));
+          if (u_thresholds[0] + heightDelta > 0.0) twilightLevel = 0.0;
+        } else {
+          float altitude = degrees(asin(clamp(u_center_height + heightDelta, -1.0, 1.0)));
+          twilightLevel = -altitude / twilightStepAngle;
         }
         float brightness = clamp(pow(clamp(1. - att, 0., 1.), twilightLevel), 0., 1.);
         fragColor = mix(u_night_color, u_daytime_color, brightness) * u_opacity;
@@ -425,58 +440,43 @@ export class NightLayer implements CustomLayerInterface {
     }
   }
 
-  #updateModel(gl: WebGLRenderingContext | WebGL2RenderingContext) {
-    if (!this.#map) return;
-    if (!this.#vbo) return;
-    if (!this.#ibo) return;
-
-    const [w, e] = this.#map.getBounds().toArray();
-    const xmin = Math.floor(MercatorCoordinate.fromLngLat(w).x);
-    const xmax = Math.ceil(MercatorCoordinate.fromLngLat(e).x);
-
-    const modelSignature = this.#map.style?.projection?.name === 'globe' ? 'globe' : [xmin, xmax].join(':');
-    if (modelSignature === this.#modelSignature) return;
-
-    let meshBuffers: TileMesh;
-    if (modelSignature === 'globe') {
-      // model for globe projection
-      meshBuffers = createTileMesh(
-        {
-          granularity: 100,
-          generateBorders: false,
-          extendToNorthPole: true,
-          extendToSouthPole: true,
-        },
-        '16bit',
-      );
-
-      meshBuffers.vertices = new Float32Array(new Int16Array(meshBuffers.vertices)).map((x) => x / 8192.0).buffer;
-    } else {
-      const vertices = new Float32Array([xmin, 0, xmax, 0, xmin, 1, xmin, 1, xmax, 0, xmax, 1]).buffer;
-
-      meshBuffers = {
-        vertices,
-        indices: new Uint16Array([0, 1, 2, 3, 4, 5]).buffer,
-        uses32bitIndices: false,
-      };
+  #getMesh(
+    gl: WebGLRenderingContext | WebGL2RenderingContext,
+    granularity: number,
+    north: boolean,
+    south: boolean,
+  ): Mesh {
+    const key = `${granularity}:${north}:${south}`;
+    const cached = this.#meshCache!.get(key);
+    if (cached) return cached;
+    const data = createTileMesh(
+      {
+        granularity,
+        generateBorders: false,
+        extendToNorthPole: north,
+        extendToSouthPole: south,
+      },
+      '16bit',
+    );
+    const vertices = gl.createBuffer();
+    const indices = gl.createBuffer();
+    if (!vertices || !indices) {
+      if (vertices) gl.deleteBuffer(vertices);
+      if (indices) gl.deleteBuffer(indices);
+      throw new Error('failed to create tile mesh buffers');
     }
-
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.#vbo);
-    gl.bufferData(gl.ARRAY_BUFFER, meshBuffers.vertices, gl.DYNAMIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, null);
-
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.#ibo);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, meshBuffers.indices, gl.DYNAMIC_DRAW);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
-
-    this.#indices = meshBuffers.indices.byteLength / 2;
-    this.#modelSignature = modelSignature;
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertices);
+    gl.bufferData(gl.ARRAY_BUFFER, data.vertices, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indices);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, data.indices, gl.STATIC_DRAW);
+    const mesh = { vertices, indices, count: data.indices.byteLength / 2 };
+    this.#meshCache!.set(key, mesh);
+    return mesh;
   }
 
   render(gl: WebGLRenderingContext | WebGL2RenderingContext, options: CustomRenderMethodInput): void {
     if (!this.#programCache) return;
-    if (!this.#vbo) return;
-    if (!this.#ibo) return;
+    if (!this.#meshCache) return;
     if (!this.#map) return;
 
     const shaderData = options.shaderData;
@@ -488,40 +488,74 @@ export class NightLayer implements CustomLayerInterface {
     if (!program) return;
 
     const { lng: subsolarLng, lat: subsolarLat } = this.getSubsolarPoint();
+    const solarLongitude = radians(subsolarLng);
+    const solarLatitude = radians(subsolarLat);
+    const solarSin = Math.sin(solarLatitude);
+    const solarCos = Math.cos(solarLatitude);
 
     gl.useProgram(program);
 
-    gl.uniform2fv(gl.getUniformLocation(program, 'u_subsolar'), [subsolarLng, subsolarLat]);
     gl.uniform1f(gl.getUniformLocation(program, 'u_opacity'), this.#opacity);
     gl.uniform4fv(gl.getUniformLocation(program, 'u_night_color'), premultiplyAlpha(this.#color));
     gl.uniform4fv(gl.getUniformLocation(program, 'u_daytime_color'), premultiplyAlpha(this.#daytimeColor));
     gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_steps'), this.#twilightSteps);
     gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_attenuation'), this.#twilightAttenuation);
 
-    const projectionData = options.defaultProjectionData;
-    gl.uniformMatrix4fv(
-      gl.getUniformLocation(program, 'u_projection_fallback_matrix'),
-      false,
-      projectionData.fallbackMatrix,
-    );
-    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'u_projection_matrix'), false, projectionData.mainMatrix);
-    gl.uniform4fv(
-      gl.getUniformLocation(program, 'u_projection_tile_mercator_coords'),
-      projectionData.tileMercatorCoords,
-    );
-    gl.uniform4fv(gl.getUniformLocation(program, 'u_projection_clipping_plane'), projectionData.clippingPlane);
-    gl.uniform1f(gl.getUniformLocation(program, 'u_projection_transition'), projectionData.projectionTransition);
+    const globe = options.defaultProjectionData.projectionTransition > 0;
+    const tiles = this.#map.coveringTiles({ tileSize: 256 });
+    gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.STENCIL_TEST);
+    gl.enable(gl.CULL_FACE);
+    gl.frontFace(gl.CCW);
+    gl.cullFace(gl.BACK);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
-    this.#updateModel(gl);
+    for (const tile of tiles) {
+      const { x, y, z } = tile.canonical;
+      const size = 2 ** -z;
+      const projectionData = options.getProjectionData({
+        tileID: { canonical: { x, y, z }, wrap: tile.wrap },
+        applyGlobeMatrix: true,
+      });
+      gl.uniformMatrix4fv(gl.getUniformLocation(program, 'u_projection_matrix'), false, projectionData.mainMatrix);
+      gl.uniformMatrix4fv(
+        gl.getUniformLocation(program, 'u_projection_fallback_matrix'),
+        false,
+        projectionData.fallbackMatrix,
+      );
+      gl.uniform4fv(
+        gl.getUniformLocation(program, 'u_projection_tile_mercator_coords'),
+        projectionData.tileMercatorCoords,
+      );
+      gl.uniform4fv(gl.getUniformLocation(program, 'u_projection_clipping_plane'), projectionData.clippingPlane);
+      gl.uniform1f(gl.getUniformLocation(program, 'u_projection_transition'), projectionData.projectionTransition);
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.#vbo);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.#ibo);
+      // Compute the tile center in float64; the shader computes small local differences.
+      const t = Math.exp(Math.PI * (1 - 2 * (y + 0.5) * size));
+      const latitudeSin = (t * t - 1) / (t * t + 1);
+      const latitudeCos = (2 * t) / (t * t + 1);
+      const longitude = radians((x + 0.5) * size * 360 - 180);
+      const longitudeDifference = solarLongitude - longitude;
+      const sun = [solarSin, solarCos * Math.cos(longitudeDifference), solarCos * Math.sin(longitudeDifference)];
+      const centerHeight = sun[0] * latitudeSin + sun[1] * latitudeCos;
+      const thresholds = TWILIGHT_THRESHOLD_SINES.map((threshold) => centerHeight - threshold);
+      gl.uniform4fv(gl.getUniformLocation(program, 'u_tile'), [t, latitudeSin, latitudeCos, size]);
+      gl.uniform3fv(gl.getUniformLocation(program, 'u_sun'), sun);
+      gl.uniform1f(gl.getUniformLocation(program, 'u_center_height'), centerHeight);
+      gl.uniform1fv(gl.getUniformLocation(program, 'u_thresholds[0]'), thresholds);
 
-    const index = gl.getAttribLocation(program, 'a_position');
-    gl.enableVertexAttribArray(index);
-    gl.vertexAttribPointer(index, 2, gl.FLOAT, false, 0, 0);
-
-    gl.drawElements(gl.TRIANGLES, this.#indices!, gl.UNSIGNED_SHORT, 0);
+      // Match MapLibre's raster tile subdivision: 128 at z=0, at least 32 per tile.
+      const granularity = globe ? Math.max(Math.floor(128 * size), 32) : 1;
+      const mesh = this.#getMesh(gl, granularity, globe && y === 0, globe && y === 2 ** z - 1);
+      gl.bindBuffer(gl.ARRAY_BUFFER, mesh.vertices);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, mesh.indices);
+      const index = gl.getAttribLocation(program, 'a_position');
+      gl.enableVertexAttribArray(index);
+      gl.vertexAttribPointer(index, 2, gl.SHORT, false, 0, 0);
+      gl.drawElements(gl.TRIANGLES, mesh.count, gl.UNSIGNED_SHORT, 0);
+    }
   }
 }
 

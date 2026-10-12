@@ -2,33 +2,35 @@
   "name": "maplibre-gl-nightlayer",
   "version": "1.0.0",
   "description": "A Night Layer for MapLibre GL JS",
+  "keywords": [
+    "daynight",
+    "earth",
+    "maplibre",
+    "shadow",
+    "terminator"
+  ],
+  "homepage": "https://github.com/kikuchan/maplibre-gl-nightlayer#readme",
+  "license": "MIT",
+  "author": "kikuchan98@gmail.com",
+  "repository": {
+    "url": "https://github.com/kikuchan/maplibre-gl-nightlayer"
+  },
+  "files": [
+    "dist/",
+    "THIRD-PARTY-NOTICES"
+  ],
   "type": "module",
   "main": "dist/main.js",
   "module": "dist/main.js",
   "types": "dist/main.d.ts",
-  "files": [
-    "dist/"
-  ],
   "scripts": {
+    "generate:lut": "uv run scripts/generate-lighting-lut.py",
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint ./src tsdown.config.ts",
     "format": "oxfmt --check ./src tsdown.config.ts",
     "format:fix": "oxfmt --write ./src tsdown.config.ts"
   },
-  "keywords": [
-    "maplibre",
-    "daynight",
-    "earth",
-    "shadow",
-    "terminator"
-  ],
-  "author": "kikuchan98@gmail.com",
-  "homepage": "https://github.com/kikuchan/maplibre-gl-nightlayer#readme",
-  "repository": {
-    "url": "https://github.com/kikuchan/maplibre-gl-nightlayer"
-  },
-  "license": "MIT",
   "devDependencies": {
     "maplibre-gl": "^6.13.0",
     "oxfmt": "^0.72.0",

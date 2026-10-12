@@ -1,5 +1,5 @@
 :root {
-  background: radial-gradient(circle at 20% 20%, #0c1c3a, #040b16 45%);
+  background: black;
   font-family: 'BIZ UDGothic', system-ui, sans-serif;
   color-scheme: dark;
   --panel-inset: 1rem;
@@ -85,6 +85,16 @@ body {
 
   select {
     min-width: 5rem;
+  }
+
+  input[type='range'] {
+    width: 6rem;
+    accent-color: #8acfff;
+  }
+
+  output {
+    min-width: 4ch;
+    font-variant-numeric: tabular-nums;
   }
 
   option {
@@ -212,9 +222,47 @@ body {
   }
 }
 
-.maplibregl-ctrl-group {
+#map .maplibregl-ctrl-group {
+  margin: 0;
+  padding: 0.5rem;
+  background: rgb(10 18 32 / 88%);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 20%);
   overflow: hidden;
-  border-radius: 10px;
+
+  button {
+    width: 2rem;
+    height: 2rem;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+  }
+
+  button + button {
+    border-top: 1px solid rgb(255 255 255 / 18%);
+  }
+
+  button:focus-visible {
+    outline: 2px solid #7dd3fc;
+    outline-offset: -3px;
+    box-shadow: none;
+  }
+
+  .maplibregl-ctrl-icon {
+    filter: brightness(0) invert(1);
+  }
+
+  button:disabled .maplibregl-ctrl-icon {
+    opacity: 0.35;
+  }
+}
+
+@media (hover: hover) {
+  #map .maplibregl-ctrl-group button:not(:disabled):hover {
+    background: rgb(255 255 255 / 16%);
+  }
 }
 
 .maplibregl-ctrl.maplibregl-ctrl-attrib {
@@ -241,7 +289,7 @@ body {
 
 .maplibregl-ctrl-top-right {
   top: calc(var(--safe-top) + var(--panel-inset) + var(--time-panel-height) + 0.5rem);
-  right: var(--safe-right);
+  right: calc(var(--safe-right) + var(--panel-inset));
 }
 
 .maplibregl-ctrl-bottom-right {

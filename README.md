@@ -18,14 +18,14 @@ import { NightLayer } from 'maplibre-gl-nightlayer';
 
 map.on('load', () => {
   map.addLayer(new NightLayer({
-    // These are the default values
     date: null,
     opacity: 0.5,
-    color: [0, 0, 0, 255],
+    color: [0, 0, 0, 0],
     daytimeColor: [0, 0, 0, 0],
     twilightSteps: 0,
-    twilightAttenuation: 0.5,
+    twilightAttenuation: 1,
     updateInterval: 10000,
+    atmosphere: 0,
   }));
 });
 ```
@@ -59,6 +59,7 @@ type Options = {
   twilightSteps?: number;
   twilightAttenuation?: number;
   updateInterval?: number;
+  atmosphere?: number;
 };
 
 export class NightLayer implements CustomLayerInterface {
@@ -90,6 +91,9 @@ export class NightLayer implements CustomLayerInterface {
   getUpdateInterval(): number;
   setUpdateInterval(interval: number): void;
 
+  getAtmosphere(): number;
+  setAtmosphere(atmosphere: number): void;
+
     :
 };
 
@@ -99,3 +103,5 @@ export function getSubsolarPoint(date?: Date | null): {
 };
 
 ```
+
+When self-hosting, keep `lighting-lut.zip` beside the built JavaScript. Requires `OES_texture_float_linear`.

@@ -877,6 +877,14 @@ void main() {
   if (!occluded && normalHeight.a >= 100000.0) linear += u_direct_solar_radiance * sunCoverage * (1.0 - mapColor.a);
   linear = linear * mix(vec3(1.0), transmission, u_atmosphere_strength) + scattering * u_atmosphere_strength;
   if (u_metering) {
+    // Empty space is not an underexposed subject, even though it has a valid sky endpoint.
+    float cameraHeight = length(u_camera_origin) - 6371.0;
+    float t = dot(u_camera_origin, direction);
+    float radial = (100.0 - cameraHeight) * (12842.0 + cameraHeight);
+    if (cameraHeight > 100.0 && (t >= 0.0 || t * t + radial < 0.0)) {
+      fragColor = vec4(0.0);
+      return;
+    }
     float luminance = dot(max(linear, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
     fragColor = vec4(vec3((clamp(log2(max(luminance, exp2(-20.0))), -20.0, 4.0) + 20.0) / 24.0), 1.0);
     return;

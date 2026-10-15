@@ -47,7 +47,11 @@ export class AutoExposure {
           const ceiling = samples[Math.floor((samples.length - 1) * 0.9)].log;
           const total = samples.reduce((sum, sample) => sum + sample.weight, 0);
           const mean = samples.reduce((sum, sample) => sum + Math.min(sample.log, ceiling) * sample.weight, 0) / total;
-          this.#target = Math.max(-4, Math.min(8, Math.log2(0.18) - mean));
+          // A visible night hemisphere must not wash out the sunlit hemisphere.
+          const highlights = Math.log2(0.8) - ceiling;
+          this.#target = Math.max(-4, Math.min(8, Math.log2(0.18) - mean, highlights));
+        } else {
+          this.#target = 0;
         }
       }
     }

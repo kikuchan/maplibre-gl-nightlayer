@@ -57,20 +57,52 @@ body {
   align-items: center;
 }
 
-.display-controls {
+.settings {
   position: fixed;
   left: calc(var(--safe-left) + var(--panel-inset));
   bottom: calc(var(--safe-bottom) + var(--panel-inset));
-  max-width: calc(100% - var(--safe-left) - var(--safe-right) - 2 * var(--panel-inset));
-  display: flex;
+  z-index: 2;
+}
+
+.settings-toggle {
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid #7dd3fc;
+    outline-offset: 3px;
+  }
+}
+
+.display-controls {
+  position: fixed;
+  inset: auto;
+  left: calc(var(--safe-left) + var(--panel-inset));
+  bottom: calc(var(--safe-bottom) + var(--panel-inset) + 3.25rem);
+  margin: 0;
+  width: 22rem;
+  max-width: calc(100vw - var(--safe-left) - var(--safe-right) - 2 * var(--panel-inset));
+  max-height: calc(
+    100dvh - var(--safe-top) - var(--safe-bottom) - 2 * var(--panel-inset) - var(--time-panel-height) - 4rem
+  );
+  overflow-y: auto;
+  display: none;
+  flex-direction: column;
   gap: 0.75rem;
-  flex-wrap: wrap;
   font-size: 0.875rem;
+
+  &:popover-open {
+    display: flex;
+  }
 
   > div {
     display: flex;
     gap: 0.5rem;
     align-items: center;
+    justify-content: space-between;
   }
 
   button,
@@ -89,12 +121,15 @@ body {
 
   input[type='range'] {
     width: 6rem;
+    min-width: 0;
+    flex: 1;
     accent-color: #8acfff;
   }
 
   output {
     min-width: 4ch;
     font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
   option {

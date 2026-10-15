@@ -10,6 +10,12 @@ import { Decimal, Calendar } from 'timescope';
 maplibregl.setWorkerUrl(maplibreWorkerUrl);
 
 const DATE_RANGE_SECONDS = 8_640_000_000_000;
+const SETTINGS_ICON = `data:image/svg+xml,${encodeURIComponent(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#f1f5f9" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m9.5 3-.6 2.1-1.6.9-2.1-.5-2.5 4.3 1.5 1.6v1.8l-1.5 1.6 2.5 4.3 2.1-.5 1.6.9.6 2.1h5l.6-2.1 1.6-.9 2.1.5 2.5-4.3-1.5-1.6v-1.8l1.5-1.6-2.5-4.3-2.1.5-1.6-.9L14.5 3Z"/>
+    <circle cx="12" cy="12" r="3"/>
+  </svg>
+`)}`;
 type Basemap = 'satellite' | 'osm';
 
 function Clock({ time, now, onclick }: { time: () => Decimal | null; now: () => number; onclick: () => void }) {
@@ -371,136 +377,147 @@ function App() {
           </button>
         </div>
       </div>
-      <div class="popup display-controls">
-        <div>
-          <button id="copy-view" type="button" onclick={() => copyView()}>
-            COPY
-          </button>
-          <button id="load-view" type="button" onclick={() => loadView()}>
-            LOAD
-          </button>
-        </div>
-        <div>
-          <label for="atmosphere-blend">Atmosphere</label>
-          <input
-            id="atmosphere-blend"
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            value={atmosphere}
-            oninput={(e: Event) => setAtmosphere(Number((e.currentTarget as HTMLInputElement).value))}
-          />
-          <output for="atmosphere-blend">{() => atmosphere().toFixed(2)}</output>
-        </div>
-        <div>
-          <span id="auto-exposure-label">Auto exposure</span>
-          <button
-            id="btn-auto-exposure"
-            type="button"
-            class="toggle-switch"
-            role="switch"
-            aria-labelledby="auto-exposure-label"
-            aria-checked={autoExposure}
-            onclick={() => setAutoExposure((v) => !v)}
-          >
-            <span class="toggle-track" aria-hidden="true" />
-          </button>
-        </div>
-        <div>
-          <label for="exposure">{() => (autoExposure() ? 'Exposure comp.' : 'Exposure')}</label>
-          <input
-            id="exposure"
-            type="range"
-            min="-12"
-            max="12"
-            step="0.1"
-            value={exposure}
-            oninput={(e: Event) => setExposure(Number((e.currentTarget as HTMLInputElement).value))}
-          />
-          <output for="exposure">{() => `${exposure() > 0 ? '+' : ''}${exposure().toFixed(1)} stops`}</output>
-        </div>
-        <div>
-          <label for="layer-opacity">Layer opacity</label>
-          <input
-            id="layer-opacity"
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            value={opacity}
-            oninput={(e: Event) => setOpacity(Number((e.currentTarget as HTMLInputElement).value))}
-          />
-          <output for="layer-opacity">{() => opacity().toFixed(2)}</output>
-        </div>
-        <div>
-          <label for="twilight-steps">Twilights</label>
-          <select
-            id="twilight-steps"
-            value={twilights}
-            ref={(select) =>
-              effect(() => {
-                const value = String(twilights());
-                queueMicrotask(() => {
-                  (select as HTMLSelectElement).value = value;
-                });
-              })
-            }
-            onchange={(e: Event) => setTwilights(Number((e.currentTarget as HTMLSelectElement).value))}
-          >
-            <option value="0">Gradation</option>
-            <option value="1">1</option>
-            <option value="2">2</option>
-            <option value="3">3</option>
-            <option value="4">4</option>
-          </select>
-        </div>
-        <div>
-          <label for="basemap">Map</label>
-          <select
-            id="basemap"
-            value={basemap}
-            ref={(select) =>
-              effect(() => {
-                const value = basemap();
-                queueMicrotask(() => {
-                  (select as HTMLSelectElement).value = value;
-                });
-              })
-            }
-            onchange={(e: Event) => setBasemap((e.currentTarget as HTMLSelectElement).value as Basemap)}
-          >
-            <option value="satellite">Satellite</option>
-            <option value="osm">OpenStreetMap</option>
-          </select>
-        </div>
-        <div>
-          <span id="globe-label">Globe</span>
-          <button
-            id="btn-projection"
-            type="button"
-            class="toggle-switch"
-            role="switch"
-            aria-labelledby="globe-label"
-            aria-checked={globe}
-            onclick={() => setGlobe((v) => !v)}
-          >
-            <span class="toggle-track" aria-hidden="true" />
-          </button>
-        </div>
-        <div>
-          <span id="terrain-label">Terrain</span>
-          <button
-            id="btn-terrain"
-            type="button"
-            class="toggle-switch"
-            role="switch"
-            aria-labelledby="terrain-label"
-            aria-checked={terrain}
-            onclick={() => setTerrain((v) => !v)}
-          >
-            <span class="toggle-track" aria-hidden="true" />
-          </button>
+      <div class="settings">
+        <button
+          type="button"
+          class="popup settings-toggle"
+          popovertarget="settings-panel"
+          aria-label="Settings"
+          title="Settings"
+        >
+          <img src={SETTINGS_ICON} width="24" height="24" alt="" />
+        </button>
+        <div id="settings-panel" class="popup display-controls" popover="auto" aria-label="Settings">
+          <div>
+            <button id="copy-view" type="button" onclick={() => copyView()}>
+              COPY
+            </button>
+            <button id="load-view" type="button" onclick={() => loadView()}>
+              LOAD
+            </button>
+          </div>
+          <div>
+            <label for="atmosphere-blend">Atmosphere</label>
+            <input
+              id="atmosphere-blend"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={atmosphere}
+              oninput={(e: Event) => setAtmosphere(Number((e.currentTarget as HTMLInputElement).value))}
+            />
+            <output for="atmosphere-blend">{() => atmosphere().toFixed(2)}</output>
+          </div>
+          <div>
+            <span id="auto-exposure-label">Auto exposure</span>
+            <button
+              id="btn-auto-exposure"
+              type="button"
+              class="toggle-switch"
+              role="switch"
+              aria-labelledby="auto-exposure-label"
+              aria-checked={autoExposure}
+              onclick={() => setAutoExposure((v) => !v)}
+            >
+              <span class="toggle-track" aria-hidden="true" />
+            </button>
+          </div>
+          <div>
+            <label for="exposure">{() => (autoExposure() ? 'Exposure comp.' : 'Exposure')}</label>
+            <input
+              id="exposure"
+              type="range"
+              min="-12"
+              max="12"
+              step="0.1"
+              value={exposure}
+              oninput={(e: Event) => setExposure(Number((e.currentTarget as HTMLInputElement).value))}
+            />
+            <output for="exposure">{() => `${exposure() > 0 ? '+' : ''}${exposure().toFixed(1)} stops`}</output>
+          </div>
+          <div>
+            <label for="layer-opacity">Layer opacity</label>
+            <input
+              id="layer-opacity"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={opacity}
+              oninput={(e: Event) => setOpacity(Number((e.currentTarget as HTMLInputElement).value))}
+            />
+            <output for="layer-opacity">{() => opacity().toFixed(2)}</output>
+          </div>
+          <div>
+            <label for="twilight-steps">Twilights</label>
+            <select
+              id="twilight-steps"
+              value={twilights}
+              ref={(select) =>
+                effect(() => {
+                  const value = String(twilights());
+                  queueMicrotask(() => {
+                    (select as HTMLSelectElement).value = value;
+                  });
+                })
+              }
+              onchange={(e: Event) => setTwilights(Number((e.currentTarget as HTMLSelectElement).value))}
+            >
+              <option value="0">Gradation</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+            </select>
+          </div>
+          <div>
+            <label for="basemap">Map</label>
+            <select
+              id="basemap"
+              value={basemap}
+              ref={(select) =>
+                effect(() => {
+                  const value = basemap();
+                  queueMicrotask(() => {
+                    (select as HTMLSelectElement).value = value;
+                  });
+                })
+              }
+              onchange={(e: Event) => setBasemap((e.currentTarget as HTMLSelectElement).value as Basemap)}
+            >
+              <option value="satellite">Satellite</option>
+              <option value="osm">OpenStreetMap</option>
+            </select>
+          </div>
+          <div>
+            <span id="globe-label">Globe</span>
+            <button
+              id="btn-projection"
+              type="button"
+              class="toggle-switch"
+              role="switch"
+              aria-labelledby="globe-label"
+              aria-checked={globe}
+              onclick={() => setGlobe((v) => !v)}
+            >
+              <span class="toggle-track" aria-hidden="true" />
+            </button>
+          </div>
+          <div>
+            <span id="terrain-label">Terrain</span>
+            <button
+              id="btn-terrain"
+              type="button"
+              class="toggle-switch"
+              role="switch"
+              aria-labelledby="terrain-label"
+              aria-checked={terrain}
+              onclick={() => setTerrain((v) => !v)}
+            >
+              <span class="toggle-track" aria-hidden="true" />
+            </button>
+          </div>
         </div>
       </div>
     </>

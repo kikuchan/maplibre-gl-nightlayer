@@ -1,5 +1,8 @@
 const SIZE = 16;
 const SAMPLE_INTERVAL = 250;
+export const EXPOSURE_METER_MIN_LOG = -40;
+export const EXPOSURE_METER_LOG_RANGE = 44;
+export const MAX_EXPOSURE = 24;
 
 /** Low-resolution, unexposed log-luminance metering with asynchronous readback. */
 export class AutoExposure {
@@ -39,7 +42,10 @@ export class AutoExposure {
             const i = (y * SIZE + x) * 4;
             if (this.#pixels[i + 3] === 0) continue;
             const radius = (((x + 0.5) / SIZE) * 2 - 1) ** 2 + (((y + 0.5) / SIZE) * 2 - 1) ** 2;
-            samples.push({ log: (this.#pixels[i] / 255) * 24 - 20, weight: Math.exp(-2 * radius) });
+            samples.push({
+              log: (this.#pixels[i] / 255) * EXPOSURE_METER_LOG_RANGE + EXPOSURE_METER_MIN_LOG,
+              weight: Math.exp(-2 * radius),
+            });
           }
         if (samples.length) {
           samples.sort((a, b) => a.log - b.log);
@@ -49,7 +55,7 @@ export class AutoExposure {
           const mean = samples.reduce((sum, sample) => sum + Math.min(sample.log, ceiling) * sample.weight, 0) / total;
           // A visible night hemisphere must not wash out the sunlit hemisphere.
           const highlights = Math.log2(0.8) - ceiling;
-          this.#target = Math.max(-4, Math.min(8, Math.log2(0.18) - mean, highlights));
+          this.#target = Math.max(-4, Math.min(MAX_EXPOSURE, Math.log2(0.18) - mean, highlights));
         } else {
           this.#target = 0;
         }

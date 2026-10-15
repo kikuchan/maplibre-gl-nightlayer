@@ -80,8 +80,9 @@ function App() {
   const [globe, setGlobe] = createSignal(query.get('projection') !== 'mercator');
   const [basemap, setBasemap] = createSignal<Basemap>(query.get('basemap') === 'osm' ? 'osm' : 'satellite');
   const [atmosphere, setAtmosphere] = createSignal(numberParam('atmosphere', 1, 0, 1));
-  const [exposure, setExposure] = createSignal(numberParam('exposure', 0, -12, 12));
+  const [exposure, setExposure] = createSignal(numberParam('exposure', 0, -12, 24));
   const [autoExposure, setAutoExposure] = createSignal(query.get('autoExposure') === 'true');
+  const [stars, setStars] = createSignal(query.get('stars') !== 'false');
   const [terrain, setTerrain] = createSignal(query.get('terrain') === 'true');
   const [canLookAround, setCanLookAround] = createSignal(false);
   const [lookingAround, setLookingAround] = createSignal(false);
@@ -189,6 +190,8 @@ function App() {
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
     const attr = new maplibregl.AttributionControl({
       compact: false,
+      customAttribution:
+        'Stars: <a href="https://github.com/astronexus/HYG-Database">HYG / D. Nash</a> (<a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>), <a href="https://svs.gsfc.nasa.gov/4851/">NASA/GSFC/SVS</a>, <a href="https://www.cosmos.esa.int/web/gaia/dpac">ESA/Gaia/DPAC</a>',
     });
     map.addControl(attr);
 
@@ -197,6 +200,7 @@ function App() {
       atmosphere: atmosphere(),
       exposure: exposure(),
       autoExposure: autoExposure(),
+      stars: stars(),
       updateInterval: 10000,
     });
 
@@ -217,6 +221,7 @@ function App() {
         atmosphere: Number(atmosphere().toFixed(3)),
         exposure: Number(exposure().toFixed(3)),
         autoExposure: autoExposure(),
+        stars: stars(),
         opacity: Number(opacity().toFixed(3)),
         twilights: twilights(),
         timelineZoom: Number(zoom().toFixed(2)),
@@ -245,6 +250,7 @@ function App() {
         const basemapValue = view.basemap === undefined ? basemap() : view.basemap;
         const exposureValue = view.exposure === undefined ? 0 : view.exposure;
         const autoExposureValue = view.autoExposure === undefined ? false : view.autoExposure;
+        const starsValue = view.stars === undefined ? true : view.stars;
         const date = typeof view.date === 'string' ? Date.parse(view.date) / 1000 : view.date;
         if (
           !Array.isArray(view.center) ||
@@ -260,8 +266,9 @@ function App() {
           !['satellite', 'osm'].includes(basemapValue) ||
           typeof view.terrain !== 'boolean' ||
           !inRange(view.atmosphere, 0, 1) ||
-          !inRange(exposureValue, -12, 12) ||
+          !inRange(exposureValue, -12, 24) ||
           typeof autoExposureValue !== 'boolean' ||
+          typeof starsValue !== 'boolean' ||
           !inRange(view.opacity, 0, 1) ||
           !Number.isInteger(view.twilights) ||
           !inRange(view.twilights, 0, 4) ||
@@ -277,6 +284,7 @@ function App() {
         setAtmosphere(view.atmosphere);
         setExposure(exposureValue);
         setAutoExposure(autoExposureValue);
+        setStars(starsValue);
         setOpacity(view.opacity);
         setTwilights(view.twilights);
         setZoom(timelineZoom);
@@ -308,6 +316,7 @@ function App() {
           atmosphere: view.atmosphere.toFixed(3),
           exposure: view.exposure.toFixed(3),
           autoExposure: view.autoExposure,
+          stars: view.stars,
           opacity: view.opacity.toFixed(3),
           twilights: view.twilights.toFixed(0),
           timelineZoom: view.timelineZoom.toFixed(2),
@@ -326,6 +335,7 @@ function App() {
       atmosphere();
       exposure();
       autoExposure();
+      stars();
       opacity();
       twilights();
       timeAnimating();
@@ -352,6 +362,9 @@ function App() {
     });
     effect(() => {
       nightLayer.setAutoExposure(autoExposure());
+    });
+    effect(() => {
+      nightLayer.setStars(stars());
     });
 
     effect(() => {
@@ -540,12 +553,26 @@ function App() {
             </button>
           </div>
           <div>
+            <span id="stars-label">Stars</span>
+            <button
+              id="btn-stars"
+              type="button"
+              class="toggle-switch"
+              role="switch"
+              aria-labelledby="stars-label"
+              aria-checked={stars}
+              onclick={() => setStars((value) => !value)}
+            >
+              <span class="toggle-track" aria-hidden="true" />
+            </button>
+          </div>
+          <div>
             <label for="exposure">{() => (autoExposure() ? 'Exposure comp.' : 'Exposure')}</label>
             <input
               id="exposure"
               type="range"
               min="-12"
-              max="12"
+              max="24"
               step="0.1"
               value={exposure}
               oninput={(e: Event) => setExposure(Number((e.currentTarget as HTMLInputElement).value))}

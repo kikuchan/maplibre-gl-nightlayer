@@ -2,17 +2,22 @@ import { defineConfig, type TsdownPlugin } from 'tsdown';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
-function inlineLUT(): TsdownPlugin {
+function inlineAssets(): TsdownPlugin {
   return {
-    name: 'nightlayer-inline-lut',
+    name: 'nightlayer-inline-assets',
     resolveId(source, importer) {
-      if (importer && source.endsWith('/lighting-lut.zip?inline'))
+      if (importer && /\/(lighting-lut\.zip|starfield\.webp|star-catalog\.bin\.gz)\?inline$/.test(source))
         return `\0${resolve(dirname(importer), source.slice(0, -7))}.js`;
     },
     load(id) {
-      if (!id.startsWith('\0') || !id.endsWith('/lighting-lut.zip.js')) return;
+      if (!id.startsWith('\0') || !/\/(lighting-lut\.zip|starfield\.webp|star-catalog\.bin\.gz)\.js$/.test(id)) return;
       const encoded = readFileSync(id.slice(1, -3)).toString('base64');
-      return `export default "data:application/zip;base64,${encoded}";`;
+      const mime = id.endsWith('.webp.js')
+        ? 'image/webp'
+        : id.endsWith('.bin.gz.js')
+          ? 'application/gzip'
+          : 'application/zip';
+      return `export default "data:${mime};base64,${encoded}";`;
     },
   };
 }
@@ -24,7 +29,7 @@ export default defineConfig([
     platform: 'browser',
     target: 'esnext',
     minify: true,
-    plugins: [inlineLUT()],
+    plugins: [inlineAssets()],
     dts: true,
     deps: { neverBundle: true },
   },
@@ -34,7 +39,7 @@ export default defineConfig([
     platform: 'browser',
     target: 'esnext',
     minify: true,
-    plugins: [inlineLUT()],
+    plugins: [inlineAssets()],
     dts: false,
     globalName: 'nightLayer',
     deps: {

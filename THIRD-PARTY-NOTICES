@@ -28,3 +28,41 @@ INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
 CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
+
+The embedded diffuse Milky Way is adapted from Deep Star Maps 2020:
+https://svs.gsfc.nasa.gov/4851/
+Sources: milkyway_2020_4k.exr (texture), starmap_2020_4k.exr (photometric
+reference), both in celestial ICRF/J2000 coordinates.
+Credit: NASA/Goddard Space Flight Center Scientific Visualization Studio.
+Gaia DR2: ESA/Gaia/DPAC.
+Visualization by Ernie Wright (USRA).
+
+Adaptations: linear-light reduction to 1024x512, sRGB encoding and lossy WebP
+compression; empirical normalization from unsaturated catalogue stars.
+No constellation figures or boundaries are included.
+NASA media usage guidelines: https://www.nasa.gov/nasa-brand-center/images-and-media/
+Gaia credit: https://gea.esac.esa.int/archive/documentation/GDR2/Miscellaneous/sec_credit_and_citation_instructions/
+
+The embedded point-star dataset is derived from the HYG Stellar Database v4.1,
+Copyright David Nash / Astronexus. It is licensed under Creative Commons
+Attribution-ShareAlike 4.0 International (CC BY-SA 4.0):
+https://creativecommons.org/licenses/by-sa/4.0/
+Source: https://github.com/astronexus/HYG-Database
+Revision: c7f7f883fe678cc7680169a50ccd7dcc49b060ce
+Data: hyg/CURRENT/hygdata_v41.csv
+
+Adaptations: select V <= 6.5; convert J2000 positions/proper motions and
+V magnitudes/B-V colours to GPU point records; compress the
+result as star-catalog.bin.gz. This adapted dataset retains CC BY-SA 4.0.
+The library code is a separate work and retains the project's MIT license.
+
+Photometric filter response: SVO Filter Profile Service, Generic/Johnson.V
+https://svo2.cab.inta-csic.es/theory/fps/fps.php?ID=Generic/Johnson.V
+
+Lunar orbital elements and main perturbation formulae: Paul Schlyter,
+"How to compute planetary positions": https://stjarnhimlen.se/comp/ppcomp.html
+Lunar visual phase-law reference: Krisciunas & Schaefer (1991),
+"A Model of the Brightness of Moonlight", PASP 103, 1033.
+Natural moonless-night horizontal illuminance reference (0.8 millilux):
+U.S. National Park Service, "Metrics Guide to Night Skies Report":
+https://www.nps.gov/subjects/nightskies/NSQmetrics.html

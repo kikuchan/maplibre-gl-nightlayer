@@ -1,4 +1,4 @@
 node_modules
 dist
-playground/pnpm-lock.yaml
-playground/node_modules
+__pycache__/
+.ruff_cache/

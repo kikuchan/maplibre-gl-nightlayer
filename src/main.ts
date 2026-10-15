@@ -1,7 +1,10 @@
 import type { CustomLayerInterface, CustomRenderMethodInput, Map as MaplibreMap } from 'maplibre-gl';
 import { MercatorCoordinate } from 'maplibre-gl';
 import { uploadLUT, type LUTMetadata } from './lut.js';
-import { AutoExposure } from './exposure.js';
+import { AutoExposure, EXPOSURE_METER_MIN_LOG, EXPOSURE_METER_LOG_RANGE, MAX_EXPOSURE } from './exposure.js';
+import { celestialRotation, uploadStarfield, type Starfield } from './stars.js';
+import { lunarLight } from './moon.js';
+import { compileProgram } from './gl-program.js';
 
 type Color3 = [number, number, number];
 type Color4 = [number, number, number, number];
@@ -22,10 +25,12 @@ type Options = {
    * Blend from vacuum to atmospheric lighting and transport, from 0 to 1. The Sun remains visible. Default: 0.
    */
   atmosphere?: number;
-  /** Exposure adjustment in stops, from -12 to 12. Default: 0. */
+  /** Exposure adjustment in stops, from -12 to 24. Default: 0. */
   exposure?: number;
   /** Automatically meter scene brightness; exposure becomes a compensation. Default: false. */
   autoExposure?: boolean;
+  /** Show the embedded, date-aligned stars and Milky Way. Default: true. */
+  stars?: boolean;
   /** Custom LUT ZIP URL. Uses the embedded LUT when omitted. */
   lut?: string | URL;
 };
@@ -169,6 +174,8 @@ export class NightLayer implements CustomLayerInterface {
   #atmosphere = 0;
   #exposure = 0;
   #autoExposure = false;
+  #stars = true;
+  #starfield?: Starfield;
   #exposureMeter?: AutoExposure;
   #exposureTimer?: ReturnType<typeof setTimeout>;
   #lut?: string | URL;
@@ -199,6 +206,7 @@ export class NightLayer implements CustomLayerInterface {
     this.setAtmosphere(opts.atmosphere ?? 0);
     this.setExposure(opts.exposure ?? 0);
     this.setAutoExposure(opts.autoExposure ?? false);
+    this.setStars(opts.stars ?? true);
     this.setTwilightAttenuation(opts.twilightAttenuation ?? 1);
     this.setColor(opts.color ?? [0, 0, 0, 0]);
     this.setDaytimeColor(opts.daytimeColor ?? [0, 0, 0, 0]);
@@ -287,8 +295,8 @@ export class NightLayer implements CustomLayerInterface {
     return this.#exposure;
   }
   setExposure(exposure: number): void {
-    if (!Number.isFinite(exposure) || exposure < -12 || exposure > 12)
-      throw new RangeError('Exposure must be between -12 and 12 stops');
+    if (!Number.isFinite(exposure) || exposure < -12 || exposure > MAX_EXPOSURE)
+      throw new RangeError(`Exposure must be between -12 and ${MAX_EXPOSURE} stops`);
     this.#exposure = exposure;
     this.#repaint();
   }
@@ -296,6 +304,7 @@ export class NightLayer implements CustomLayerInterface {
   getAutoExposure(): boolean {
     return this.#autoExposure;
   }
+
   setAutoExposure(enabled: boolean): void {
     this.#autoExposure = enabled;
     if (this.#exposureTimer !== undefined) clearTimeout(this.#exposureTimer);
@@ -304,6 +313,14 @@ export class NightLayer implements CustomLayerInterface {
       this.#exposureMeter?.dispose(this.#map.painter.context.gl);
       this.#exposureMeter = undefined;
     }
+    this.#repaint();
+  }
+
+  getStars(): boolean {
+    return this.#stars;
+  }
+  setStars(enabled: boolean): void {
+    this.#stars = enabled;
     this.#repaint();
   }
 
@@ -318,6 +335,20 @@ export class NightLayer implements CustomLayerInterface {
     this.#groundRenderer = new SeaLevelSurface(gl);
     this.#map = map;
     const attachment = (this.#attachment = {});
+    uploadStarfield(gl)
+      .then((starfield) => {
+        if (this.#attachment !== attachment) {
+          for (const texture of starfield.textures) gl.deleteTexture(texture);
+          starfield.points.dispose(gl);
+          return;
+        }
+        this.#starfield = starfield;
+        this.#repaint();
+      })
+      .catch((error) => {
+        if (this.#attachment === attachment) map.fire('error', { error });
+      })
+      .finally(() => map.painter.context.setDirty());
     uploadLUT(gl, this.#lut)
       .then(({ metadata, tiles, textures }) => {
         if (this.#attachment !== attachment) {
@@ -429,6 +460,9 @@ export class NightLayer implements CustomLayerInterface {
     this.#deleteSurface(gl);
     this.#deleteMapColor(gl);
     for (const texture of this.#lutTextures ?? []) gl.deleteTexture(texture);
+    for (const texture of this.#starfield?.textures ?? []) gl.deleteTexture(texture);
+    this.#starfield?.points.dispose(gl);
+    this.#starfield = undefined;
     if (this.#lightingProgram) gl.deleteProgram(this.#lightingProgram);
     if (this.#vertexArray) gl.deleteVertexArray(this.#vertexArray);
     this.#lutTextures = undefined;
@@ -503,9 +537,16 @@ export class NightLayer implements CustomLayerInterface {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
   render(context: WebGLRenderingContext | WebGL2RenderingContext, options: CustomRenderMethodInput): void {
-    if (!this.#surfaceReady || !this.#lightingProgram || !this.#lutTextures || this.#opacity <= 0) return;
+    if (!this.#surfaceReady || !this.#lightingProgram || !this.#lutTextures || !this.#starfield || this.#opacity <= 0)
+      return;
     const gl = context as WebGL2RenderingContext;
     const program = this.#lightingProgram;
+    const date = this.#date ?? new Date();
+    const rotation = celestialRotation(date);
+    const camera = atmosphereCamera(this.#map!, options);
+    const mercatorWeight = Math.max(0, Math.min(1, 1 - options.defaultProjectionData.projectionTransition));
+    const starYears = Math.max(-200, Math.min(200, (date.getTime() / 86400000 - 10957.5) / 365.25));
+    if (this.#stars) this.#starfield.points.render(gl, camera, rotation, mercatorWeight, starYears);
     const now = performance.now();
     if (this.#autoExposure) {
       this.#exposureMeter ??= new AutoExposure();
@@ -526,7 +567,16 @@ export class NightLayer implements CustomLayerInterface {
     gl.uniform4fv(gl.getUniformLocation(program, 'u_daytime_color'), premultiply(this.#daytimeColor));
     gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_steps'), this.#twilightSteps);
     gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_attenuation'), this.#twilightAttenuation);
-    const { lng, lat } = this.getSubsolarPoint();
+    const { lng, lat } = getSubsolarPoint(date);
+    const moon = lunarLight(date);
+    gl.uniform3fv(gl.getUniformLocation(program, 'u_moon_position'), moon.position);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_moon_phase'), moon.phaseAngle);
+    // Approximate extraterrestrial solar photopic illuminance, shared by lunar
+    // and natural-night calibration. LUT RGB is daylight-normalized, not lux.
+    gl.uniform1f(gl.getUniformLocation(program, 'u_moon_ratio'), moon.strength / 127500);
+    gl.uniformMatrix3fv(gl.getUniformLocation(program, 'u_celestial_rotation'), false, rotation);
+    gl.uniform1i(gl.getUniformLocation(program, 'u_stars_enabled'), this.#stars ? 1 : 0);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_milkyway_scale'), this.#starfield.backgroundScale);
     gl.uniform3fv(gl.getUniformLocation(program, 'u_solar_direction'), [
       Math.sin(radians(lng)) * Math.cos(radians(lat)),
       Math.sin(radians(lat)),
@@ -541,8 +591,16 @@ export class NightLayer implements CustomLayerInterface {
     );
     this.#copyMapColor(gl);
     const layout = this.#lutMetadata!;
-    const camera = atmosphereCamera(this.#map!, options);
-    const mercatorWeight = Math.max(0, Math.min(1, 1 - options.defaultProjectionData.projectionTransition));
+    const solarY = layout.solarRadiance.reduce((sum, value, i) => sum + value * [0.2126, 0.7152, 0.0722][i], 0);
+    gl.uniform1f(
+      gl.getUniformLocation(program, 'u_night_irradiance'),
+      // Ground coefficients multiply reflectance: Lambertian radiance is E / pi.
+      (solarY * Math.sin(layout.solarAngularRadius) ** 2 * 0.0008) / 127500,
+    );
+    gl.uniform1f(
+      gl.getUniformLocation(program, 'u_star_solar_irradiance'),
+      solarY * Math.PI * Math.sin(layout.solarAngularRadius) ** 2,
+    );
     gl.uniform1f(gl.getUniformLocation(program, 'u_atmosphere_strength'), this.#atmosphere);
     gl.uniform1f(gl.getUniformLocation(program, 'u_exposure'), this.#exposure + (this.#exposureMeter?.value ?? 0));
     gl.uniform1f(gl.getUniformLocation(program, 'u_sky_reference'), layout.skyReference);
@@ -565,6 +623,8 @@ export class NightLayer implements CustomLayerInterface {
       [7, 'u_direct_optical', this.#lutTextures[2]],
       [10, 'u_map_color', this.#mapColor!.texture],
       [11, 'u_irradiance', this.#lutTextures[3]],
+      [12, 'u_milkyway', this.#starfield.textures[0]],
+      [13, 'u_star_points', this.#starfield.points.texture],
     ] as const) {
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(unit >= 5 && unit <= 7 ? gl.TEXTURE_3D : gl.TEXTURE_2D, texture ?? null);
@@ -596,35 +656,7 @@ void main() {
 }`;
 
 function createProgram(gl: WebGL2RenderingContext, fragment: string, vertexSource = vertex): WebGLProgram {
-  const program = gl.createProgram();
-  if (!program) throw new Error('Failed to create NightLayer program');
-  const shaders: WebGLShader[] = [];
-  try {
-    for (const [type, text] of [
-      [gl.VERTEX_SHADER, vertexSource],
-      [gl.FRAGMENT_SHADER, fragment],
-    ] as const) {
-      const shader = gl.createShader(type);
-      if (!shader) throw new Error('Failed to create NightLayer shader');
-      shaders.push(shader);
-      gl.shaderSource(shader, text);
-      gl.compileShader(shader);
-      gl.attachShader(program, shader);
-    }
-    gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS))
-      throw new Error(
-        shaders.map((shader) => gl.getShaderInfoLog(shader)).join('\n') ||
-          gl.getProgramInfoLog(program) ||
-          'Failed to link NightLayer program',
-      );
-    return program;
-  } catch (error) {
-    gl.deleteProgram(program);
-    throw error;
-  } finally {
-    for (const shader of shaders) gl.deleteShader(shader);
-  }
+  return compileProgram(gl, fragment, vertexSource);
 }
 
 const lightingFragment = `#version 300 es
@@ -633,6 +665,10 @@ precision highp int;
 precision highp sampler2D;
 precision highp sampler3D;
 uniform sampler2D u_surface, u_normals, u_irradiance, u_map_color;
+uniform sampler2D u_milkyway, u_star_points;
+uniform mat3 u_celestial_rotation;
+uniform bool u_stars_enabled;
+uniform float u_star_solar_irradiance, u_milkyway_scale;
 uniform sampler3D u_direct_rayleigh, u_direct_mie, u_direct_optical;
 uniform float u_direct_counts[5], u_direct_sun_cos_radius;
 uniform vec3 u_direct_tiles, u_direct_solar_radiance;
@@ -647,6 +683,8 @@ uniform mat3 u_mercator_view, u_globe_view;
 uniform float u_mercator_weight;
 uniform vec2 u_viewport;
 uniform vec3 u_solar_direction;
+uniform vec3 u_moon_position;
+uniform float u_moon_ratio, u_moon_phase, u_night_irradiance;
 uniform vec4 u_night_color, u_daytime_color;
 uniform float u_opacity, u_twilight_steps, u_twilight_attenuation;
 uniform float u_thresholds[15];
@@ -689,9 +727,9 @@ void directTransport(vec3 geometry, vec2 solar, float branch, float airLength, v
   transmission = exp(-tau * airLength);
   scattering = (rayleigh * phases.x + mie * phases.y) * airLength;
 }
-void transportAngles(vec3 up, vec3 direction, float mu, out vec2 solar, out vec2 phases) {
-  float sun = clamp(dot(up, u_solar_direction), -1.0, 1.0);
-  float nu = clamp(dot(direction, u_solar_direction), -1.0, 1.0);
+void transportAngles(vec3 up, vec3 direction, vec3 light, float mu, out vec2 solar, out vec2 phases) {
+  float sun = clamp(dot(up, light), -1.0, 1.0);
+  float nu = clamp(dot(direction, light), -1.0, 1.0);
   float denominator = sqrt(max(0.0, (1.0 - mu * mu) * (1.0 - sun * sun)));
   float azimuth = denominator > 1e-7 ? acos(clamp((nu - mu * sun) / denominator, -1.0, 1.0)) : 0.0;
   solar = vec2((asinh(sun * sinh(4.0)) / 4.0 + 1.0) * 0.5, azimuth / ${Math.PI});
@@ -743,8 +781,14 @@ void atmosphereRay(vec3 origin, vec3 direction, float distance,
   if (airLength <= 0.0) return;
   vec3 geometry = vec3(log(1.0 + sqrt(h)) / log(11.0), view, log(1.0 + 255.0 * airLength / max(maximum, 1e-20)) / log(256.0));
   vec2 solar, phases;
-  transportAngles(up, direction, mu, solar, phases);
+  transportAngles(up, direction, u_solar_direction, mu, solar, phases);
   directTransport(geometry, solar, ground ? 0.0 : 1.0, airLength, phases, transmission, scattering);
+  if (u_moon_ratio > 1e-12) {
+    vec3 moonTransmission, moonScattering;
+    transportAngles(up, direction, normalize(u_moon_position - origin), mu, solar, phases);
+    directTransport(geometry, solar, ground ? 0.0 : 1.0, airLength, phases, moonTransmission, moonScattering);
+    scattering += moonScattering * u_moon_ratio;
+  }
 }
 ivec2 surfacePixel(ivec2 pixel, bool hasMapColor) {
   // Position/normal targets have exactly the framebuffer's resolution.
@@ -812,6 +856,19 @@ vec3 surfaceRadiance(vec3 color, vec3 normal, vec3 up, float height) {
     sun = mix(vacuumSun, sun, u_atmosphere_strength);
     illumination = sky * clamp(0.5 * (1.0 + dot(normal, up)), 0.0, 1.0)
       + sun * max(0.0, dot(normal, u_solar_direction));
+    vec3 moonDirection = normalize(u_moon_position - up * (6371.0 + height * .001));
+    float moonAltitude = asin(clamp(dot(up, moonDirection), -1.0, 1.0));
+    vec3 moonSky, moonSun;
+    surfaceIrradiance(degrees(moonAltitude), height, moonSky, moonSun);
+    float moonHorizon = clamp((moonAltitude + horizonDip(height)) / solarRadius, -1.0, 1.0);
+    float moonVisible = (acos(-moonHorizon) + moonHorizon * sqrt(max(0.0, 1.0 - moonHorizon * moonHorizon))) / ${Math.PI};
+    vec3 vacuumMoon = u_direct_solar_radiance * (sin(solarRadius) * sin(solarRadius)) * moonVisible;
+    illumination += u_moon_ratio * (moonSky * u_atmosphere_strength * clamp(.5 * (1.0 + dot(normal, up)), 0.0, 1.0)
+      + mix(vacuumMoon, moonSun, u_atmosphere_strength) * max(0.0, dot(normal, moonDirection)));
+    // Combined stars/Milky Way/airglow/zodiacal floor: not another copy of each
+    // catalogue star. In vacuum retain only a rough extraterrestrial-star share.
+    illumination += vec3(u_night_irradiance * mix(.25, 1.0, u_atmosphere_strength))
+      * clamp(.5 * (1.0 + dot(normal, up)), 0.0, 1.0);
     weight = mix(visibleSun, atmosphericDay, u_atmosphere_strength);
   }
   float day = weight * u_daytime_color.a;
@@ -846,6 +903,7 @@ void main() {
     kilometresPerDepth += length(ray) * (1.0 - u_mercator_weight);
   }
   direction = normalize(direction);
+  vec3 rayDx = dFdx(direction), rayDy = dFdy(direction);
   float sunAngle = atan(length(cross(direction, u_solar_direction)), dot(direction, u_solar_direction));
   float radius = acos(u_direct_sun_cos_radius);
   // Derivatives across unrelated terrain/sky endpoints must not spread the disk
@@ -874,7 +932,49 @@ void main() {
     linear += skyScattering * u_atmosphere_strength * (1.0 - mapColor.a);
   }
   // A position on the ground is not a solar-disk background, even without tiles.
-  if (!occluded && normalHeight.a >= 100000.0) linear += u_direct_solar_radiance * sunCoverage * (1.0 - mapColor.a);
+  if (!occluded && normalHeight.a >= 100000.0) {
+    vec3 background = u_direct_solar_radiance * sunCoverage;
+    vec3 toMoon = u_moon_position - u_camera_origin;
+    vec3 moonDirection = normalize(toMoon);
+    float moonRadius = asin(1737.4 / length(toMoon));
+    float moonSeparation = length(cross(direction, moonDirection));
+    float moonEdge = max(length(rayDx), length(rayDy));
+    float moonCoverage = dot(direction, moonDirection) > 0.0
+      ? 1.0 - smoothstep(sin(moonRadius) - moonEdge * .5, sin(moonRadius) + moonEdge * .5, moonSeparation) : 0.0;
+    if (moonCoverage > 0.0) {
+      // Analytic lunar sphere: the visible terminator follows the phase angle;
+      // its disk-average flux is normalized to the empirical lunar phase law.
+      vec3 sunTangent = u_solar_direction - moonDirection * dot(u_solar_direction, moonDirection);
+      if (length(sunTangent) < 1e-6)
+        sunTangent = cross(moonDirection, abs(moonDirection.y) < .9 ? vec3(0,1,0) : vec3(1,0,0));
+      sunTangent = normalize(sunTangent);
+      vec3 side = cross(moonDirection, sunTangent);
+      vec2 disk = vec2(dot(direction, sunTangent), dot(direction, side)) / sin(moonRadius);
+      vec3 lunarNormal = vec3(disk, sqrt(max(0.0, 1.0 - dot(disk, disk))));
+      float lit = max(0.0, dot(lunarNormal, vec3(sin(u_moon_phase), 0.0, cos(u_moon_phase))));
+      float lambert = (sin(u_moon_phase) + (${Math.PI} - u_moon_phase) * cos(u_moon_phase)) / ${Math.PI};
+      float moonRadiance = u_star_solar_irradiance * u_moon_ratio
+        / max(${Math.PI} * sin(moonRadius) * sin(moonRadius), 1e-12);
+      background = mix(background, vec3(moonRadiance * lit / max((2.0 / 3.0) * lambert, 1e-6)), moonCoverage);
+    }
+    if (u_stars_enabled) {
+      vec3 celestial = u_celestial_rotation * direction;
+      // NASA's map is centered at RA 0h, increasing left; its first row is north.
+      vec2 uv = vec2(0.5 - atan(celestial.y, celestial.x) / 6.28318530718,
+                     0.5 - asin(clamp(celestial.z, -1.0, 1.0)) / 3.14159265359);
+      // Explicit gradients avoid the RA wrap seam and divergent ground/sky derivatives.
+      float equatorial = max(dot(celestial.xy, celestial.xy), 1e-8);
+      vec3 du = vec3(celestial.y, -celestial.x, 0.0) / (6.28318530718 * equatorial);
+      vec3 dv = vec3(0.0, 0.0, -1.0 / (3.14159265359 * sqrt(equatorial)));
+      vec3 dx = u_celestial_rotation * rayDx, dy = u_celestial_rotation * rayDy;
+      vec3 stars = textureGrad(u_milkyway, uv, vec2(dot(du, dx), dot(dv, dx)), vec2(dot(du, dy), dot(dv, dy))).rgb * u_milkyway_scale;
+      // Sparse point sources are deliberately excluded from 16x16 scene metering.
+      if (!u_metering) stars += texelFetch(u_star_points, ivec2(screen), 0).rgb
+        * 1e-12 / max(length(cross(rayDx, rayDy)), 1e-30);
+      background += stars * u_star_solar_irradiance * (1.0 - sunCoverage) * (1.0 - moonCoverage);
+    }
+    linear += background * (1.0 - mapColor.a);
+  }
   linear = linear * mix(vec3(1.0), transmission, u_atmosphere_strength) + scattering * u_atmosphere_strength;
   if (u_metering) {
     // Empty space is not an underexposed subject, even though it has a valid sky endpoint.
@@ -886,7 +986,7 @@ void main() {
       return;
     }
     float luminance = dot(max(linear, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
-    fragColor = vec4(vec3((clamp(log2(max(luminance, exp2(-20.0))), -20.0, 4.0) + 20.0) / 24.0), 1.0);
+    fragColor = vec4(vec3((clamp(log2(max(luminance, exp2(${EXPOSURE_METER_MIN_LOG.toFixed(1)}))), ${EXPOSURE_METER_MIN_LOG.toFixed(1)}, 4.0) - ${EXPOSURE_METER_MIN_LOG.toFixed(1)}) / ${EXPOSURE_METER_LOG_RANGE.toFixed(1)}), 1.0);
     return;
   }
   // Whole-layer opacity is applied once, including coverage, sky and the solar disk.

@@ -4,6 +4,8 @@ import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&ur
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './main.css';
 import { NightLayer } from '../../src/main';
+import { LookAround } from './look-around';
+import { DEFAULT_FOV, MAX_FOV, MIN_FOV } from './camera-settings';
 import { Timescope } from '@timescope/luna';
 import { Decimal, Calendar } from 'timescope';
 
@@ -14,6 +16,17 @@ const SETTINGS_ICON = `data:image/svg+xml,${encodeURIComponent(`
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#f1f5f9" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
     <path d="m9.5 3-.6 2.1-1.6.9-2.1-.5-2.5 4.3 1.5 1.6v1.8l-1.5 1.6 2.5 4.3 2.1-.5 1.6.9.6 2.1h5l.6-2.1 1.6-.9 2.1.5 2.5-4.3-1.5-1.6v-1.8l1.5-1.6-2.5-4.3-2.1.5-1.6-.9L14.5 3Z"/>
     <circle cx="12" cy="12" r="3"/>
+  </svg>
+`)}`;
+const LOOK_AROUND_ICON = `data:image/svg+xml,${encodeURIComponent(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#f1f5f9" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/>
+    <circle cx="12" cy="12" r="3"/>
+  </svg>
+`)}`;
+const RESTORE_ICON = `data:image/svg+xml,${encodeURIComponent(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#f1f5f9" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 10a9 9 0 1 1 2.6 8.4M3 4v6h6"/>
   </svg>
 `)}`;
 type Basemap = 'satellite' | 'osm';
@@ -70,12 +83,46 @@ function App() {
   const [exposure, setExposure] = createSignal(numberParam('exposure', 0, -12, 12));
   const [autoExposure, setAutoExposure] = createSignal(query.get('autoExposure') === 'true');
   const [terrain, setTerrain] = createSignal(query.get('terrain') === 'true');
+  const [canLookAround, setCanLookAround] = createSignal(false);
+  const [lookingAround, setLookingAround] = createSignal(false);
+  const [fieldOfView, setFieldOfView] = createSignal(numberParam('fov', DEFAULT_FOV, MIN_FOV, MAX_FOV));
 
   const [animating, setAnimating] = createSignal(false);
   const [editing, setEditing] = createSignal(false);
   const [now, setNow] = createSignal(Date.now());
   let copyView = async () => {};
   let loadView = () => {};
+  let toggleLookAround = () => {};
+  let changeFieldOfView = (_value: number) => {};
+  let fovDrag: { id: number; x: number } | undefined;
+  const startFovDrag = (event: Event) => {
+    const pointer = event as PointerEvent;
+    if (fovDrag || pointer.button !== 0) return;
+    event.preventDefault();
+    const slider = event.currentTarget as HTMLInputElement;
+    slider.focus({ preventScroll: true });
+    slider.setPointerCapture(pointer.pointerId);
+    fovDrag = { id: pointer.pointerId, x: pointer.clientX };
+  };
+  const moveFovDrag = (event: Event) => {
+    const pointer = event as PointerEvent;
+    if (fovDrag?.id !== pointer.pointerId) return;
+    event.preventDefault();
+    const slider = event.currentTarget as HTMLInputElement;
+    // Eight slider-widths span the full range, allowing fine adjustments even
+    // on a compact control. Native keyboard input still uses the small step.
+    const delta = (pointer.clientX - fovDrag.x) / slider.clientWidth;
+    const log = Math.log10(fieldOfView()) + (delta * Math.log10(MAX_FOV / MIN_FOV)) / 8;
+    changeFieldOfView(Math.max(MIN_FOV, Math.min(MAX_FOV, 10 ** log)));
+    fovDrag.x = pointer.clientX;
+  };
+  const endFovDrag = (event: Event) => {
+    const pointer = event as PointerEvent;
+    if (fovDrag?.id !== pointer.pointerId) return;
+    fovDrag = undefined;
+    const slider = event.currentTarget as HTMLInputElement;
+    if (slider.hasPointerCapture(pointer.pointerId)) slider.releasePointerCapture(pointer.pointerId);
+  };
 
   onMount(() => {
     const map = new maplibregl.Map({
@@ -131,6 +178,14 @@ function App() {
       maxPitch: 85,
       attributionControl: false,
     });
+    map.setVerticalFieldOfView(fieldOfView());
+    map.on('move', () => setFieldOfView(map.getVerticalFieldOfView()));
+    const lookAround = new LookAround(map, (available, active) => {
+      setCanLookAround(available);
+      setLookingAround(active);
+    });
+    toggleLookAround = () => lookAround.toggle();
+    changeFieldOfView = (value) => lookAround.setFieldOfView(value);
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
     const attr = new maplibregl.AttributionControl({
       compact: false,
@@ -146,14 +201,16 @@ function App() {
     });
 
     const captureView = () => {
-      const center = map.getCenter();
+      const view = lookAround.returnView;
+      const center = view?.center ? maplibregl.LngLat.convert(view.center) : map.getCenter();
       const date = timeAnimating();
       return {
         center: [Number(center.lng.toFixed(8)), Number(center.lat.toFixed(8))],
-        zoom: Number(map.getZoom().toFixed(3)),
-        pitch: Number(map.getPitch().toFixed(3)),
-        bearing: Number(map.getBearing().toFixed(3)),
-        roll: Number(map.getRoll().toFixed(3)),
+        zoom: Number((view?.zoom ?? map.getZoom()).toFixed(3)),
+        pitch: Number((view?.pitch ?? map.getPitch()).toFixed(3)),
+        bearing: Number((view?.bearing ?? map.getBearing()).toFixed(3)),
+        roll: Number((view?.roll ?? map.getRoll()).toFixed(3)),
+        fov: Number(map.getVerticalFieldOfView().toFixed(3)),
         projection: globe() ? 'globe' : 'mercator',
         basemap: basemap(),
         terrain: terrain(),
@@ -183,6 +240,7 @@ function App() {
           typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
         if (!view || typeof view !== 'object' || Array.isArray(view)) throw new Error('Invalid view JSON');
         const roll = view.roll === undefined ? 0 : view.roll;
+        const fov = view.fov === undefined ? DEFAULT_FOV : view.fov;
         const timelineZoom = view.timelineZoom === undefined ? zoom() : view.timelineZoom;
         const basemapValue = view.basemap === undefined ? basemap() : view.basemap;
         const exposureValue = view.exposure === undefined ? 0 : view.exposure;
@@ -194,9 +252,10 @@ function App() {
           !inRange(view.center[0], -Infinity, Infinity) ||
           !inRange(view.center[1], -90, 90) ||
           !inRange(view.zoom, map.getMinZoom(), map.getMaxZoom()) ||
-          !inRange(view.pitch, map.getMinPitch(), map.getMaxPitch()) ||
+          !inRange(view.pitch, 0, 85) ||
           !inRange(view.bearing, -Infinity, Infinity) ||
           !inRange(roll, -Infinity, Infinity) ||
+          !inRange(fov, MIN_FOV, MAX_FOV) ||
           !['globe', 'mercator'].includes(view.projection) ||
           !['satellite', 'osm'].includes(basemapValue) ||
           typeof view.terrain !== 'boolean' ||
@@ -210,6 +269,8 @@ function App() {
           (date !== null && !inRange(date, -DATE_RANGE_SECONDS, DATE_RANGE_SECONDS))
         )
           throw new Error('Invalid view values');
+        lookAround.stop();
+        map.setVerticalFieldOfView(fov);
         setGlobe(view.projection === 'globe');
         setBasemap(basemapValue);
         setTerrain(view.terrain);
@@ -240,6 +301,7 @@ function App() {
           pitch: view.pitch.toFixed(3),
           bearing: view.bearing.toFixed(3),
           roll: view.roll.toFixed(3),
+          fov: view.fov.toFixed(3),
           projection: view.projection,
           basemap: view.basemap,
           terrain: view.terrain,
@@ -274,6 +336,7 @@ function App() {
     const [ready, setReady] = createSignal(false);
     map.on('load', () => {
       map.addLayer(nightLayer);
+      map.addLayer(lookAround);
       setReady(true);
     });
 
@@ -387,7 +450,60 @@ function App() {
         >
           <img src={SETTINGS_ICON} width="24" height="24" alt="" />
         </button>
+        <button
+          id="look-around"
+          class="popup look-around-toggle"
+          type="button"
+          aria-label={() => (lookingAround() ? 'Return to map' : 'Look around')}
+          title={() =>
+            lookingAround() ? 'Return to map (Esc)' : 'Look around: available at zoom 12+ in fully Mercator rendering'
+          }
+          ref={(button) =>
+            effect(() => {
+              (button as HTMLButtonElement).disabled = !canLookAround() && !lookingAround();
+            })
+          }
+          aria-pressed={lookingAround}
+          onclick={() => toggleLookAround()}
+        >
+          <img src={LOOK_AROUND_ICON} width="24" height="24" alt="" />
+        </button>
+        <div class="popup field-of-view">
+          <label for="field-of-view">FOV</label>
+          <input
+            id="field-of-view"
+            type="range"
+            min={Math.log10(MIN_FOV)}
+            max={Math.log10(MAX_FOV)}
+            step="0.0001"
+            value={() => Math.log10(fieldOfView())}
+            title="Vertical field of view: drag for fine adjustment; arrow keys for smaller steps"
+            onpointerdown={startFovDrag}
+            onpointermove={moveFovDrag}
+            onpointerup={endFovDrag}
+            onpointercancel={endFovDrag}
+            onlostpointercapture={endFovDrag}
+            oninput={(event: Event) => changeFieldOfView(10 ** Number((event.currentTarget as HTMLInputElement).value))}
+          />
+          <output for="field-of-view">{() => `${fieldOfView().toFixed(fieldOfView() < 10 ? 2 : 1)}°`}</output>
+          <button
+            type="button"
+            class="fov-reset"
+            aria-label="Reset field of view"
+            title="Reset field of view"
+            onclick={() => changeFieldOfView(DEFAULT_FOV)}
+          >
+            <img src={RESTORE_ICON} width="18" height="18" alt="" />
+          </button>
+        </div>
         <div id="settings-panel" class="popup display-controls" popover="auto" aria-label="Settings">
+          <p class="look-around-help">
+            {() =>
+              lookingAround()
+                ? 'Drag to look; Shift + drag to move horizontally. Wheel to move forward/back; Shift + wheel to change altitude. Esc to resume the map facing this direction (up to 85°). URL/COPY keep the entry view.'
+                : 'Available at zoom 12+ in fully Mercator rendering.'
+            }
+          </p>
           <div>
             <button id="copy-view" type="button" onclick={() => copyView()}>
               COPY
@@ -499,6 +615,7 @@ function App() {
               role="switch"
               aria-labelledby="globe-label"
               aria-checked={globe}
+              disabled={lookingAround}
               onclick={() => setGlobe((v) => !v)}
             >
               <span class="toggle-track" aria-hidden="true" />
@@ -513,6 +630,7 @@ function App() {
               role="switch"
               aria-labelledby="terrain-label"
               aria-checked={terrain}
+              disabled={lookingAround}
               onclick={() => setTerrain((v) => !v)}
             >
               <span class="toggle-track" aria-hidden="true" />

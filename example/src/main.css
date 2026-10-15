@@ -58,10 +58,80 @@ body {
 }
 
 .settings {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   position: fixed;
   left: calc(var(--safe-left) + var(--panel-inset));
   top: calc(var(--safe-top) + var(--panel-inset) + var(--time-panel-height) + 0.5rem);
   z-index: 2;
+}
+
+.look-around-toggle {
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid #7dd3fc;
+    outline-offset: 3px;
+  }
+
+  &[aria-pressed='true'] {
+    border-color: #7dd3fc;
+    background: #183d59;
+  }
+
+  &:disabled {
+    border-color: rgb(148 163 184 / 12%);
+    background: rgb(15 23 42 / 65%);
+    box-shadow: none;
+    cursor: not-allowed;
+
+    img {
+      opacity: 0.25;
+    }
+  }
+}
+
+.field-of-view {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  height: 2.75rem;
+  min-width: 0;
+  font-size: 0.75rem;
+
+  input {
+    width: clamp(2rem, 10vw, 8rem);
+    min-width: 0;
+    touch-action: none;
+    accent-color: #8acfff;
+  }
+
+  output {
+    min-width: 5ch;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .fov-reset {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    cursor: pointer;
+
+    &:hover {
+      background: rgb(255 255 255 / 12%);
+    }
+  }
 }
 
 .settings-toggle {
@@ -116,6 +186,11 @@ body {
     cursor: pointer;
   }
 
+  button:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
   select {
     min-width: 5rem;
   }
@@ -136,6 +211,13 @@ body {
   option {
     background: #101b2c;
   }
+}
+
+.look-around-help {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: #b8c7d9;
 }
 
 #timescope {

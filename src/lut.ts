@@ -1,4 +1,4 @@
-import lutURL from './lighting-lut.zip';
+import embeddedLUT from './lighting-lut.zip?inline';
 
 export type LUTMetadata = {
   gridSize: [number, number, number, number, number];
@@ -16,7 +16,7 @@ type LUTData = {
   optical: Float32Array<ArrayBuffer>;
 };
 
-let data: Promise<LUTData> | undefined;
+const data = new Map<string | undefined, Promise<LUTData>>();
 const crcTable = Uint32Array.from({ length: 256 }, (_, value) => {
   for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0);
   return value >>> 0;
@@ -28,90 +28,104 @@ function crc32(bytes: Uint8Array): number {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-function loadLUT(): Promise<LUTData> {
-  return (data ??= (async () => {
-    const response = await fetch(lutURL);
+function loadLUT(source?: string | URL): Promise<LUTData> {
+  const key = source?.toString();
+  const cached = data.get(key);
+  if (cached) return cached;
+  const pending = readLUT(key);
+  data.set(key, pending);
+  void pending.catch(() => data.delete(key));
+  return pending;
+}
+
+async function readLUT(source?: string): Promise<LUTData> {
+  let bytes: Uint8Array<ArrayBuffer>;
+  if (source === undefined) {
+    const binary = atob(embeddedLUT.slice(embeddedLUT.indexOf(',') + 1));
+    bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  } else {
+    const response = await fetch(source);
     if (!response.ok) throw new Error('Failed to load NightLayer LUT');
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    const view = new DataView(bytes.buffer);
-    const text = new TextDecoder();
-    const entries = new Map<string, Uint8Array<ArrayBuffer>>();
-    let offset = 0;
-    while (offset + 4 <= bytes.length && view.getUint32(offset, true) === 0x04034b50) {
-      if (offset + 30 > bytes.length) throw new Error('Truncated LUT ZIP header');
-      const flags = view.getUint16(offset + 6, true);
-      const method = view.getUint16(offset + 8, true);
-      const checksum = view.getUint32(offset + 14, true);
-      const compressedSize = view.getUint32(offset + 18, true);
-      const size = view.getUint32(offset + 22, true);
-      const nameLength = view.getUint16(offset + 26, true);
-      const extraLength = view.getUint16(offset + 28, true);
-      const start = offset + 30 + nameLength + extraLength;
-      const end = start + compressedSize;
-      if ((flags & ~0x800) !== 0 || method !== 8 || size === 0xffffffff || end > bytes.length)
-        throw new Error('Unsupported LUT ZIP entry');
-      const name = text.decode(bytes.subarray(offset + 30, offset + 30 + nameLength));
-      if ((offset === 0 && name !== 'metadata.json') || entries.has(name))
-        throw new Error('Invalid LUT ZIP entry order');
-      const value = new Uint8Array(
-        await new Response(
-          new Blob([bytes.subarray(start, end)]).stream().pipeThrough(new DecompressionStream('deflate-raw')),
-        ).arrayBuffer(),
-      );
-      if (value.length !== size || crc32(value) !== checksum) throw new Error('Corrupt LUT ZIP entry');
-      entries.set(name, value);
-      offset = end;
+    bytes = new Uint8Array(await response.arrayBuffer());
+  }
+  const view = new DataView(bytes.buffer);
+  const text = new TextDecoder();
+  const entries = new Map<string, Uint8Array<ArrayBuffer>>();
+  let offset = 0;
+  while (offset + 4 <= bytes.length && view.getUint32(offset, true) === 0x04034b50) {
+    if (offset + 30 > bytes.length) throw new Error('Truncated LUT ZIP header');
+    const flags = view.getUint16(offset + 6, true);
+    const method = view.getUint16(offset + 8, true);
+    const checksum = view.getUint32(offset + 14, true);
+    const compressedSize = view.getUint32(offset + 18, true);
+    const size = view.getUint32(offset + 22, true);
+    const nameLength = view.getUint16(offset + 26, true);
+    const extraLength = view.getUint16(offset + 28, true);
+    const start = offset + 30 + nameLength + extraLength;
+    const end = start + compressedSize;
+    if ((flags & ~0x800) !== 0 || method !== 8 || size === 0xffffffff || end > bytes.length)
+      throw new Error('Unsupported LUT ZIP entry');
+    const name = text.decode(bytes.subarray(offset + 30, offset + 30 + nameLength));
+    if ((offset === 0 && name !== 'metadata.json') || entries.has(name)) throw new Error('Invalid LUT ZIP entry order');
+    const value = new Uint8Array(
+      await new Response(
+        new Blob([bytes.subarray(start, end)]).stream().pipeThrough(new DecompressionStream('deflate-raw')),
+      ).arrayBuffer(),
+    );
+    if (value.length !== size || crc32(value) !== checksum) throw new Error('Corrupt LUT ZIP entry');
+    entries.set(name, value);
+    offset = end;
+  }
+  if (offset + 4 > bytes.length || view.getUint32(offset, true) !== 0x02014b50) throw new Error('Truncated LUT ZIP');
+  const header = entries.get('metadata.json');
+  if (!header) throw new Error('Missing LUT metadata');
+  const metadata: LUTMetadata = JSON.parse(text.decode(header));
+  if (
+    !Array.isArray(metadata.gridSize) ||
+    metadata.gridSize.length !== 5 ||
+    metadata.gridSize.some((n) => !Number.isSafeInteger(n) || n < 3 || n > 256) ||
+    !Array.isArray(metadata.solarRadiance) ||
+    metadata.solarRadiance.length !== 3 ||
+    metadata.solarRadiance.some((v) => !Number.isFinite(v) || v < 0) ||
+    !Number.isFinite(metadata.solarAngularRadius) ||
+    metadata.solarAngularRadius <= 0 ||
+    metadata.solarAngularRadius >= Math.PI / 2 ||
+    !Number.isFinite(metadata.mieG) ||
+    Math.abs(metadata.mieG) >= 1 ||
+    !Number.isFinite(metadata.skyReference) ||
+    metadata.skyReference <= 0
+  )
+    throw new Error('Invalid LUT metadata');
+  function floats(name: string): Float32Array<ArrayBuffer> {
+    const entry = entries.get(name);
+    if (!entry || entry.length % 4 !== 0) throw new Error(`Invalid LUT array: ${name}`);
+    const source = new DataView(entry.buffer);
+    const result = new Float32Array(entry.length / 4);
+    for (let i = 0; i < result.length; i++) {
+      result[i] = source.getFloat32(i * 4, true);
+      if (!Number.isFinite(result[i])) throw new Error(`Nonfinite LUT value: ${name}`);
     }
-    if (offset + 4 > bytes.length || view.getUint32(offset, true) !== 0x02014b50) throw new Error('Truncated LUT ZIP');
-    const header = entries.get('metadata.json');
-    if (!header) throw new Error('Missing LUT metadata');
-    const metadata: LUTMetadata = JSON.parse(text.decode(header));
-    if (
-      !Array.isArray(metadata.gridSize) ||
-      metadata.gridSize.length !== 5 ||
-      metadata.gridSize.some((n) => !Number.isSafeInteger(n) || n < 3 || n > 256) ||
-      !Array.isArray(metadata.solarRadiance) ||
-      metadata.solarRadiance.length !== 3 ||
-      metadata.solarRadiance.some((v) => !Number.isFinite(v) || v < 0) ||
-      !Number.isFinite(metadata.solarAngularRadius) ||
-      metadata.solarAngularRadius <= 0 ||
-      metadata.solarAngularRadius >= Math.PI / 2 ||
-      !Number.isFinite(metadata.mieG) ||
-      Math.abs(metadata.mieG) >= 1 ||
-      !Number.isFinite(metadata.skyReference) ||
-      metadata.skyReference <= 0
-    )
-      throw new Error('Invalid LUT metadata');
-    function floats(name: string): Float32Array<ArrayBuffer> {
-      const entry = entries.get(name);
-      if (!entry || entry.length % 4 !== 0) throw new Error(`Invalid LUT array: ${name}`);
-      const source = new DataView(entry.buffer);
-      const result = new Float32Array(entry.length / 4);
-      for (let i = 0; i < result.length; i++) {
-        result[i] = source.getFloat32(i * 4, true);
-        if (!Number.isFinite(result[i])) throw new Error(`Nonfinite LUT value: ${name}`);
-      }
-      return result;
-    }
-    const irradiance = floats('irradiance.bin');
-    const rayleigh = floats('rayleigh.bin');
-    const mie = floats('mie.bin');
-    const optical = floats('optical.bin');
-    const [h, v, d, s, a] = metadata.gridSize;
-    if (
-      entries.size !== 5 ||
-      irradiance.length < 14 ||
-      irradiance.length % 7 !== 0 ||
-      rayleigh.length !== 2 * h * v * d * s * a * 3 ||
-      mie.length !== rayleigh.length ||
-      optical.length !== 2 * h * v * d * 3
-    )
-      throw new Error('Invalid LUT dimensions');
-    for (let i = 0; i < irradiance.length; i += 7)
-      if (i > 0 && irradiance[i] <= irradiance[i - 7]) throw new Error('Invalid irradiance coordinates');
-    if (optical.some((v) => v < 0)) throw new Error('Negative optical coefficient');
-    return { metadata, irradiance, rayleigh, mie, optical };
-  })());
+    return result;
+  }
+  const irradiance = floats('irradiance.bin');
+  const rayleigh = floats('rayleigh.bin');
+  const mie = floats('mie.bin');
+  const optical = floats('optical.bin');
+  const [h, v, d, s, a] = metadata.gridSize;
+  if (
+    entries.size !== 5 ||
+    irradiance.length < 14 ||
+    irradiance.length % 7 !== 0 ||
+    rayleigh.length !== 2 * h * v * d * s * a * 3 ||
+    mie.length !== rayleigh.length ||
+    optical.length !== 2 * h * v * d * 3
+  )
+    throw new Error('Invalid LUT dimensions');
+  for (let i = 0; i < irradiance.length; i += 7)
+    if (i > 0 && irradiance[i] <= irradiance[i - 7]) throw new Error('Invalid irradiance coordinates');
+  if (optical.some((v) => v < 0)) throw new Error('Negative optical coefficient');
+  return { metadata, irradiance, rayleigh, mie, optical };
 }
 
 function volumeTiles(grid: number[], limit: number): [number, number, number] {
@@ -136,12 +150,15 @@ function volumeTiles(grid: number[], limit: number): [number, number, number] {
   return best;
 }
 
-export async function uploadLUT(gl: WebGL2RenderingContext): Promise<{
+export async function uploadLUT(
+  gl: WebGL2RenderingContext,
+  source?: string | URL,
+): Promise<{
   metadata: LUTMetadata;
   tiles: [number, number, number];
   textures: [WebGLTexture, WebGLTexture, WebGLTexture, WebGLTexture];
 }> {
-  const lut = await loadLUT();
+  const lut = await loadLUT(source);
   const [h, v, d, s, a] = lut.metadata.gridSize;
   const tiles = volumeTiles(lut.metadata.gridSize, Math.min(256, gl.getParameter(gl.MAX_3D_TEXTURE_SIZE)));
   const extent = [d + 2, v + 2, h + 2].map((n, i) => n * tiles[i]);

@@ -1,20 +1,18 @@
 import { defineConfig, type TsdownPlugin } from 'tsdown';
 import { readFileSync } from 'node:fs';
-import { basename, dirname, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
-function lutAssets(format: 'esm' | 'iife'): TsdownPlugin {
+function inlineLUT(): TsdownPlugin {
   return {
-    name: 'nightlayer-lut-assets',
+    name: 'nightlayer-inline-lut',
     resolveId(source, importer) {
-      if (importer && source.endsWith('/lighting-lut.zip')) return `\0${resolve(dirname(importer), source)}.js`;
+      if (importer && source.endsWith('/lighting-lut.zip?inline'))
+        return `\0${resolve(dirname(importer), source.slice(0, -7))}.js`;
     },
     load(id) {
       if (!id.startsWith('\0') || !id.endsWith('/lighting-lut.zip.js')) return;
-      const path = id.slice(1, -3),
-        fileName = basename(path);
-      this.emitFile({ type: 'asset', fileName, source: readFileSync(path) });
-      const base = format === 'esm' ? 'import.meta.url' : '(document.currentScript?.src ?? document.baseURI)';
-      return `export default new URL(${JSON.stringify(fileName)}, ${base}).href;`;
+      const encoded = readFileSync(id.slice(1, -3)).toString('base64');
+      return `export default "data:application/zip;base64,${encoded}";`;
     },
   };
 }
@@ -26,7 +24,7 @@ export default defineConfig([
     platform: 'browser',
     target: 'esnext',
     minify: true,
-    plugins: [lutAssets('esm')],
+    plugins: [inlineLUT()],
     dts: true,
     deps: { neverBundle: true },
   },
@@ -36,7 +34,7 @@ export default defineConfig([
     platform: 'browser',
     target: 'esnext',
     minify: true,
-    plugins: [lutAssets('iife')],
+    plugins: [inlineLUT()],
     dts: false,
     globalName: 'nightLayer',
     deps: {

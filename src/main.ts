@@ -20,6 +20,8 @@ type Options = {
    * Blend from vacuum to atmospheric lighting and transport, from 0 to 1. The Sun remains visible. Default: 0.
    */
   atmosphere?: number;
+  /** Custom LUT ZIP URL. Uses the embedded LUT when omitted. */
+  lut?: string | URL;
 };
 type Target = { texture: WebGLTexture; framebuffer: WebGLFramebuffer };
 const radians = (degrees: number) => (degrees * Math.PI) / 180;
@@ -164,6 +166,7 @@ export class NightLayer implements CustomLayerInterface {
   #twilightAttenuation = 1;
   #updateInterval: number;
   #atmosphere = 0;
+  #lut?: string | URL;
   #lutTextures?: [WebGLTexture, WebGLTexture, WebGLTexture, WebGLTexture];
   #lutMetadata?: LUTMetadata;
   #lutTiles?: [number, number, number];
@@ -187,6 +190,7 @@ export class NightLayer implements CustomLayerInterface {
     this.#opacity = opts.opacity ?? 0.5;
     this.#twilightSteps = opts.twilightSteps ?? 0;
     this.#updateInterval = opts.updateInterval ?? 10000;
+    this.#lut = opts.lut;
     this.setAtmosphere(opts.atmosphere ?? 0);
     this.setTwilightAttenuation(opts.twilightAttenuation ?? 1);
     this.setColor(opts.color ?? [0, 0, 0, 0]);
@@ -282,7 +286,7 @@ export class NightLayer implements CustomLayerInterface {
     this.#groundRenderer = new SeaLevelSurface(gl);
     this.#map = map;
     const attachment = (this.#attachment = {});
-    uploadLUT(gl)
+    uploadLUT(gl, this.#lut)
       .then(({ metadata, tiles, textures }) => {
         if (this.#attachment !== attachment) {
           for (const texture of textures) gl.deleteTexture(texture);

@@ -60,6 +60,7 @@ type Options = {
   twilightAttenuation?: number;
   updateInterval?: number;
   atmosphere?: number;
+  lut?: string | URL;
 };
 
 export class NightLayer implements CustomLayerInterface {
@@ -104,4 +105,4 @@ export function getSubsolarPoint(date?: Date | null): {
 
 ```
 
-When self-hosting, keep `lighting-lut.zip` beside the built JavaScript. Requires `OES_texture_float_linear`.
+The default LUT is embedded. Use `lut` to load a custom LUT ZIP by URL. Requires `OES_texture_float_linear`.

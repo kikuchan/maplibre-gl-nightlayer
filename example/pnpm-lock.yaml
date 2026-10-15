@@ -18,8 +18,8 @@ importers:
         specifier: ^0.1.1
         version: 0.1.1(@kikuchan/calendar@0.2.0(@kikuchan/decimal@0.2.0))(@kikuchan/decimal@0.2.0)(@luna_ui/luna@0.23.2(vite@8.3.4))(timescope@0.1.4(@kikuchan/calendar@0.2.0(@kikuchan/decimal@0.2.0))(@kikuchan/decimal@0.2.0))
       maplibre-gl:
-        specifier: ^6.13.0
-        version: 6.13.0
+        specifier: ^6.14.0
+        version: 6.14.0
       timescope:
         specifier: ^0.1.4
         version: 0.1.4(@kikuchan/calendar@0.2.0(@kikuchan/decimal@0.2.0))(@kikuchan/decimal@0.2.0)
@@ -418,8 +418,8 @@ packages:
     resolution: {integrity: sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==}
     engines: {node: '>= 12.0.0'}
 
-  maplibre-gl@6.13.0:
-    resolution: {integrity: sha512-ELXk4h+xl0URFQEnVbAN6MGn61P6jq4amUWHiskLVsvHCaKdf1Zq6G8UNOD0AQ3UaXoL5ECc8ovz8yqYEBGPKw==}
+  maplibre-gl@6.14.0:
+    resolution: {integrity: sha512-L7U9y9TyPJ3P/JJbW+eH+A3FzdPq+3fnZFqqeCwf/S6cRGganHwVI5b/C8/zOYzreUzsloDPZVVaMQA94wOt4A==}
     engines: {node: '>=16.14.0', npm: '>=8.1.0'}
 
   minimist@1.2.8:
@@ -775,7 +775,7 @@ snapshots:
       lightningcss-win32-arm64-msvc: 1.33.0
       lightningcss-win32-x64-msvc: 1.33.0
 
-  maplibre-gl@6.13.0:
+  maplibre-gl@6.14.0:
     dependencies:
       '@mapbox/point-geometry': 1.1.0
       '@mapbox/tiny-sdf': 2.3.0

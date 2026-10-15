@@ -60,7 +60,7 @@ body {
 .settings {
   position: fixed;
   left: calc(var(--safe-left) + var(--panel-inset));
-  bottom: calc(var(--safe-bottom) + var(--panel-inset));
+  top: calc(var(--safe-top) + var(--panel-inset) + var(--time-panel-height) + 0.5rem);
   z-index: 2;
 }
 
@@ -81,7 +81,7 @@ body {
   position: fixed;
   inset: auto;
   left: calc(var(--safe-left) + var(--panel-inset));
-  bottom: calc(var(--safe-bottom) + var(--panel-inset) + 3.25rem);
+  top: calc(var(--safe-top) + var(--panel-inset) + var(--time-panel-height) + 3.75rem);
   margin: 0;
   width: 22rem;
   max-width: calc(100vw - var(--safe-left) - var(--safe-right) - 2 * var(--panel-inset));
@@ -100,6 +100,7 @@ body {
 
   > div {
     display: flex;
+    flex-shrink: 0;
     gap: 0.5rem;
     align-items: center;
     justify-content: space-between;
@@ -378,31 +379,15 @@ body {
   }
 
   .display-controls {
-    bottom: calc(var(--safe-bottom) + var(--panel-inset) + 1.875rem);
-    right: calc(var(--safe-right) + var(--panel-inset));
-    max-height: 35dvh;
-    overflow-y: auto;
-    font-size: 1rem;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1fr);
-    gap: 0.5rem;
-
-    > div {
-      min-width: 0;
-      flex-direction: column;
-      gap: 0.25rem;
-      font-size: 0.75rem;
-    }
+    width: calc(100vw - var(--safe-left) - var(--safe-right) - 2 * var(--panel-inset));
 
     button,
-    select {
+    select,
+    input[type='range'] {
       min-height: 2.75rem;
     }
 
     select {
-      width: 100%;
-      min-width: 0;
-      max-width: 7rem;
       font-size: 1rem;
     }
 

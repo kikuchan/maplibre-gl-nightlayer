@@ -1,6 +1,7 @@
 import type { CustomLayerInterface, CustomRenderMethodInput, Map as MaplibreMap } from 'maplibre-gl';
 import { MercatorCoordinate } from 'maplibre-gl';
 import { uploadLUT, type LUTMetadata } from './lut.js';
+import { AutoExposure } from './exposure.js';
 
 type Color3 = [number, number, number];
 type Color4 = [number, number, number, number];
@@ -21,6 +22,10 @@ type Options = {
    * Blend from vacuum to atmospheric lighting and transport, from 0 to 1. The Sun remains visible. Default: 0.
    */
   atmosphere?: number;
+  /** Exposure adjustment in stops, from -12 to 12. Default: 0. */
+  exposure?: number;
+  /** Automatically meter scene brightness; exposure becomes a compensation. Default: false. */
+  autoExposure?: boolean;
   /** Custom LUT ZIP URL. Uses the embedded LUT when omitted. */
   lut?: string | URL;
 };
@@ -162,6 +167,10 @@ export class NightLayer implements CustomLayerInterface {
   #twilightAttenuation = 1;
   #updateInterval: number;
   #atmosphere = 0;
+  #exposure = 0;
+  #autoExposure = false;
+  #exposureMeter?: AutoExposure;
+  #exposureTimer?: ReturnType<typeof setTimeout>;
   #lut?: string | URL;
   #lutTextures?: [WebGLTexture, WebGLTexture, WebGLTexture, WebGLTexture];
   #lutMetadata?: LUTMetadata;
@@ -188,6 +197,8 @@ export class NightLayer implements CustomLayerInterface {
     this.#updateInterval = opts.updateInterval ?? 10000;
     this.#lut = opts.lut;
     this.setAtmosphere(opts.atmosphere ?? 0);
+    this.setExposure(opts.exposure ?? 0);
+    this.setAutoExposure(opts.autoExposure ?? false);
     this.setTwilightAttenuation(opts.twilightAttenuation ?? 1);
     this.setColor(opts.color ?? [0, 0, 0, 0]);
     this.setDaytimeColor(opts.daytimeColor ?? [0, 0, 0, 0]);
@@ -195,6 +206,7 @@ export class NightLayer implements CustomLayerInterface {
   }
 
   #repaint(): void {
+    this.#exposureMeter?.invalidate();
     this.#map?.triggerRepaint();
   }
   #setIntervalTimer(): void {
@@ -268,6 +280,30 @@ export class NightLayer implements CustomLayerInterface {
     if (!Number.isFinite(atmosphere) || atmosphere < 0 || atmosphere > 1)
       throw new RangeError('Atmosphere must be between 0 and 1');
     this.#atmosphere = atmosphere;
+    this.#repaint();
+  }
+
+  getExposure(): number {
+    return this.#exposure;
+  }
+  setExposure(exposure: number): void {
+    if (!Number.isFinite(exposure) || exposure < -12 || exposure > 12)
+      throw new RangeError('Exposure must be between -12 and 12 stops');
+    this.#exposure = exposure;
+    this.#repaint();
+  }
+
+  getAutoExposure(): boolean {
+    return this.#autoExposure;
+  }
+  setAutoExposure(enabled: boolean): void {
+    this.#autoExposure = enabled;
+    if (this.#exposureTimer !== undefined) clearTimeout(this.#exposureTimer);
+    this.#exposureTimer = undefined;
+    if (!enabled && this.#map) {
+      this.#exposureMeter?.dispose(this.#map.painter.context.gl);
+      this.#exposureMeter = undefined;
+    }
     this.#repaint();
   }
 
@@ -377,6 +413,10 @@ export class NightLayer implements CustomLayerInterface {
   onRemove(map: MaplibreMap, context: WebGLRenderingContext | WebGL2RenderingContext): void {
     const gl = context as WebGL2RenderingContext;
     if (this.#timer !== undefined) clearInterval(this.#timer);
+    if (this.#exposureTimer !== undefined) clearTimeout(this.#exposureTimer);
+    this.#exposureTimer = undefined;
+    this.#exposureMeter?.dispose(gl);
+    this.#exposureMeter = undefined;
     this.#timer = undefined;
     map.off('sourcedata', this.#invalidateSurface);
     map.off('terrain', this.#invalidateSurface);
@@ -418,6 +458,7 @@ export class NightLayer implements CustomLayerInterface {
       this.#map.getRenderWorldCopies(),
     ]);
     if (this.#surfaceReady && signature === this.#surfaceSignature) return;
+    this.#exposureMeter?.invalidate();
     this.#surfaceReady = false;
     if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('NightLayer requires EXT_color_buffer_float');
     const width = Math.max(1, gl.drawingBufferWidth);
@@ -465,6 +506,11 @@ export class NightLayer implements CustomLayerInterface {
     if (!this.#surfaceReady || !this.#lightingProgram || !this.#lutTextures || this.#opacity <= 0) return;
     const gl = context as WebGL2RenderingContext;
     const program = this.#lightingProgram;
+    const now = performance.now();
+    if (this.#autoExposure) {
+      this.#exposureMeter ??= new AutoExposure();
+      this.#exposureMeter.update(gl, now);
+    }
     gl.useProgram(program);
     gl.bindVertexArray(this.#vertexArray!);
     gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
@@ -498,7 +544,9 @@ export class NightLayer implements CustomLayerInterface {
     const camera = atmosphereCamera(this.#map!, options);
     const mercatorWeight = Math.max(0, Math.min(1, 1 - options.defaultProjectionData.projectionTransition));
     gl.uniform1f(gl.getUniformLocation(program, 'u_atmosphere_strength'), this.#atmosphere);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_exposure'), this.#exposure + (this.#exposureMeter?.value ?? 0));
     gl.uniform1f(gl.getUniformLocation(program, 'u_sky_reference'), layout.skyReference);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_irradiance_height_max'), layout.irradianceHeightMax);
     gl.uniform3fv(gl.getUniformLocation(program, 'u_camera_origin'), camera.origin);
     gl.uniformMatrix4fv(gl.getUniformLocation(program, 'u_inverse_projection'), false, camera.inverseProjection);
     gl.uniformMatrix3fv(gl.getUniformLocation(program, 'u_mercator_view'), false, camera.mercatorView);
@@ -522,7 +570,21 @@ export class NightLayer implements CustomLayerInterface {
       gl.bindTexture(unit >= 5 && unit <= 7 ? gl.TEXTURE_3D : gl.TEXTURE_2D, texture ?? null);
       gl.uniform1i(gl.getUniformLocation(program, name), unit);
     }
+    const metering = gl.getUniformLocation(program, 'u_metering');
+    this.#exposureMeter?.measure(gl, now, () => {
+      gl.uniform1i(metering, 1);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    });
+    gl.uniform1i(metering, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+    if (this.#exposureTimer !== undefined) clearTimeout(this.#exposureTimer);
+    this.#exposureTimer = undefined;
+    if (this.#exposureMeter?.needsFrame) {
+      this.#exposureTimer = setTimeout(() => {
+        this.#exposureTimer = undefined;
+        this.#map?.triggerRepaint();
+      }, 33);
+    }
   }
 }
 export default NightLayer;
@@ -575,6 +637,9 @@ uniform sampler3D u_direct_rayleigh, u_direct_mie, u_direct_optical;
 uniform float u_direct_counts[5], u_direct_sun_cos_radius;
 uniform vec3 u_direct_tiles, u_direct_solar_radiance;
 uniform float u_atmosphere_strength, u_fog_mie_g, u_sky_reference;
+uniform float u_irradiance_height_max;
+uniform float u_exposure;
+uniform bool u_metering;
 uniform float u_max_sun_edge;
 uniform vec3 u_camera_origin;
 uniform mat4 u_inverse_projection;
@@ -589,7 +654,7 @@ out vec4 fragColor;
 vec3 displayRadiance(vec3 linear) {
   // Narkowicz ACES filmic fit (not a full ACES color-management pipeline).
   // Values beyond this bound already map to display white; cap before squaring.
-  linear = clamp(linear, 0.0, 64.0);
+  linear = clamp(linear * exp2(u_exposure), 0.0, 64.0);
   linear = clamp((linear * (2.51 * linear + 0.03)) / (linear * (2.43 * linear + 0.59) + 0.14), 0.0, 1.0);
   vec3 color = mix(1.055 * pow(linear, vec3(1.0 / 2.4)) - 0.055,
                    12.92 * linear, lessThanEqual(linear, vec3(0.0031308)));
@@ -698,9 +763,17 @@ ivec2 surfacePixel(ivec2 pixel, bool hasMapColor) {
   }
   return result;
 }
-void surfaceIrradiance(float altitude, out vec3 sky, out vec3 sun) {
+float horizonDip(float height) {
+  float h = max(0.0, height) * 0.001;
+  return atan(sqrt(h * (12742.0 + h)), 6371.0);
+}
+void surfaceIrradiance(float altitude, float height, out vec3 sky, out vec3 sun) {
   sky = vec3(0.0); sun = vec3(0.0);
-  int low = 0, high = textureSize(u_irradiance, 0).x - 1;
+  ivec2 size = textureSize(u_irradiance, 0);
+  float h = clamp(height, 0.0, u_irradiance_height_max);
+  float row = sqrt(h / u_irradiance_height_max) * float(size.y / 2 - 1);
+  altitude += degrees(horizonDip(h));
+  int low = 0, high = size.x - 1;
   if (altitude < texelFetch(u_irradiance, ivec2(0, 0), 0).a) return;
   while (high - low > 1) {
     int middle = (low + high) / 2;
@@ -709,10 +782,12 @@ void surfaceIrradiance(float altitude, out vec3 sky, out vec3 sun) {
   }
   vec4 a = texelFetch(u_irradiance, ivec2(low, 0), 0), b = texelFetch(u_irradiance, ivec2(high, 0), 0);
   float fraction = clamp((altitude - a.a) / (b.a - a.a), 0.0, 1.0);
-  sky = mix(a.rgb, b.rgb, fraction);
-  sun = mix(texelFetch(u_irradiance, ivec2(low, 1), 0).rgb, texelFetch(u_irradiance, ivec2(high, 1), 0).rgb, fraction);
+  // Shared solar knots and a square-root height grid allow hardware bilinear interpolation.
+  vec2 coordinate = vec2(float(low) + fraction + 0.5, row + 0.5) / vec2(size);
+  sky = texture(u_irradiance, coordinate).rgb;
+  sun = texture(u_irradiance, coordinate + vec2(0.0, 0.5)).rgb;
 }
-vec3 surfaceRadiance(vec3 color, vec3 normal, vec3 up) {
+vec3 surfaceRadiance(vec3 color, vec3 normal, vec3 up, float height) {
   float solarHeight = clamp(dot(up, u_solar_direction), -1.0, 1.0);
   vec3 illumination;
   float weight;
@@ -726,11 +801,11 @@ vec3 surfaceRadiance(vec3 color, vec3 normal, vec3 up) {
     illumination = vec3(weight);
   } else {
     vec3 sky, sun;
-    surfaceIrradiance(degrees(asin(solarHeight)), sky, sun);
+    surfaceIrradiance(degrees(asin(solarHeight)), height, sky, sun);
     float atmosphericDay = clamp(dot(sky, vec3(0.2126, 0.7152, 0.0722)) / u_sky_reference, 0.0, 1.0);
     // Visible fraction of the finite solar disk across the geometric horizon.
     float solarRadius = acos(u_direct_sun_cos_radius);
-    float horizonPosition = clamp(asin(solarHeight) / solarRadius, -1.0, 1.0);
+    float horizonPosition = clamp((asin(solarHeight) + horizonDip(height)) / solarRadius, -1.0, 1.0);
     float visibleSun = (acos(-horizonPosition) + horizonPosition * sqrt(max(0.0, 1.0 - horizonPosition * horizonPosition))) / ${Math.PI};
     vec3 vacuumSun = u_direct_solar_radiance * (${Math.PI} * sin(solarRadius) * sin(solarRadius)) * visibleSun;
     sky *= u_atmosphere_strength;
@@ -746,16 +821,17 @@ vec3 surfaceRadiance(vec3 color, vec3 normal, vec3 up) {
   return pow(clamp(color, 0.0, 1.0), vec3(2.2)) * illumination;
 }
 void main() {
-  vec4 mapColor = texelFetch(u_map_color, ivec2(gl_FragCoord.xy), 0);
-  ivec2 pixel = surfacePixel(ivec2(gl_FragCoord.xy), mapColor.a > 0.0);
+  vec2 screen = u_metering ? gl_FragCoord.xy / 16.0 * u_viewport : gl_FragCoord.xy;
+  vec4 mapColor = texelFetch(u_map_color, ivec2(screen), 0);
+  ivec2 pixel = surfacePixel(ivec2(screen), mapColor.a > 0.0);
   vec4 surface = texelFetch(u_surface, pixel, 0);
   if (surface.a <= 0.0) {
-    fragColor = mapColor;
+    fragColor = u_metering ? vec4(0.0) : mapColor;
     return;
   }
   vec4 normalHeight = texelFetch(u_normals, pixel, 0);
   vec3 up = normalize(surface.xyz);
-  vec2 clip = gl_FragCoord.xy / u_viewport * 2.0 - 1.0;
+  vec2 clip = screen / u_viewport * 2.0 - 1.0;
   vec3 view = (u_inverse_projection * vec4(clip, 0.0, 1.0)).xyz;
   vec3 direction = vec3(0.0);
   float kilometresPerDepth = 0.0;
@@ -787,7 +863,7 @@ void main() {
   vec3 linear = vec3(0.0);
   if (mapColor.a > 0.0) {
     vec3 tileColor = clamp(mapColor.rgb / mapColor.a, 0.0, 1.0);
-    linear = surfaceRadiance(tileColor, normalize(normalHeight.xyz), up) * mapColor.a;
+    linear = surfaceRadiance(tileColor, normalize(normalHeight.xyz), up, normalHeight.a) * mapColor.a;
   }
   if (mapColor.a < 1.0 && normalHeight.a < 100000.0 && u_atmosphere_strength > 0.0) {
     vec3 skyTransmission, skyScattering;
@@ -800,6 +876,11 @@ void main() {
   // A position on the ground is not a solar-disk background, even without tiles.
   if (!occluded && normalHeight.a >= 100000.0) linear += u_direct_solar_radiance * sunCoverage * (1.0 - mapColor.a);
   linear = linear * mix(vec3(1.0), transmission, u_atmosphere_strength) + scattering * u_atmosphere_strength;
+  if (u_metering) {
+    float luminance = dot(max(linear, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+    fragColor = vec4(vec3((clamp(log2(max(luminance, exp2(-20.0))), -20.0, 4.0) + 20.0) / 24.0), 1.0);
+    return;
+  }
   // Whole-layer opacity is applied once, including coverage, sky and the solar disk.
   vec4 completed = vec4(displayRadiance(linear), 1.0);
   fragColor = mix(mapColor, completed, clamp(u_opacity, 0.0, 1.0));

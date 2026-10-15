@@ -78,7 +78,7 @@ def create_context():
     return context
 
 
-def diffuse(context, source, sizes, altitudes, wavelength_count, orders):
+def diffuse(context, source, sizes, altitudes, wavelength_count, orders, height_count):
     """Port of upstream Model::Init/Precompute; numerical GLSL stays unchanged.
 
     The BSD-3-Clause attribution is in THIRD-PARTY-NOTICES. Preserve upstream's
@@ -383,29 +383,37 @@ def diffuse(context, source, sizes, altitudes, wavelength_count, orders):
             header([680, 550, 440])
             + """
           uniform sampler2D irradiance_texture;
-          uniform float altitude;
+          uniform sampler2D solar_angles;
+          uniform int height_count;
+          uniform bool reference_sample;
           layout(location=0) out vec4 value;
           void main() {
+            float height = reference_sample ? 0.001 : 100.0 * pow((gl_FragCoord.y - 0.5) / float(height_count - 1), 2.0);
+            float dip = degrees(acos(ATMOSPHERE.bottom_radius / (ATMOSPHERE.bottom_radius + height)));
+            float altitude = reference_sample ? 90.0 : min(90.0, texelFetch(solar_angles, ivec2(int(gl_FragCoord.x), 0), 0).r - dip);
             value = vec4(GetIrradiance(ATMOSPHERE, irradiance_texture,
-              ATMOSPHERE.bottom_radius + 0.001, sin(radians(altitude))) * 683.0, 1.0);
+              ATMOSPHERE.bottom_radius + height, sin(radians(altitude))) * 683.0, 1.0);
           }"""
         )
-        output = texture((1, 1))
-        result = []
-        for altitude in altitudes:
-            draw(
-                sample,
-                [output],
-                (1, 1),
-                [("irradiance_texture", irradiance)],
-                {"altitude": float(altitude)},
-            )
-            pixel = np.empty(4, dtype="f4")
-            GL.glReadPixels(0, 0, 1, 1, GL.GL_RGBA, GL.GL_FLOAT, pixel)
-            result.append(pixel[:3].copy())
+        angles = texture((len(altitudes), 1))
+        pixels = np.zeros((1, len(altitudes), 4), dtype='f4')
+        pixels[0, :, 0] = altitudes
+        GL.glBindTexture(angles[1], angles[0])
+        GL.glTexSubImage2D(angles[1], 0, 0, 0, len(altitudes), 1, GL.GL_RGBA, GL.GL_FLOAT, pixels)
+        output = texture((len(altitudes), height_count))
+        inputs = [('irradiance_texture', irradiance), ('solar_angles', angles)]
+        draw(sample, [output], (len(altitudes), height_count), inputs,
+             {'height_count': height_count, 'reference_sample': False})
+        result = np.empty((height_count, len(altitudes), 4), dtype='f4')
+        GL.glReadPixels(0, 0, len(altitudes), height_count, GL.GL_RGBA, GL.GL_FLOAT, result)
+        reference = texture((1, 1))
+        draw(sample, [reference], (1, 1), inputs,
+             {'height_count': height_count, 'reference_sample': True})
+        reference_sky = np.empty(4, dtype='f4')
+        GL.glReadPixels(0, 0, 1, 1, GL.GL_RGBA, GL.GL_FLOAT, reference_sky)
         spectral['multiple'] = np.concatenate(spectral['multiple'], axis=1)
         spectral['beam'] = np.concatenate(spectral['beam'], axis=0)
-        return np.array(result), spectral
+        return result[..., :3].copy(), spectral, reference_sky[:3].copy()
     finally:
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
         GL.glDeleteFramebuffers(1, [framebuffer])
@@ -433,56 +441,66 @@ observer = (
 )
 
 
-def direct(altitude, normal=False):
+DISK_NODES, DISK_WEIGHTS = leggauss(12)
+OPTICAL_NODES, OPTICAL_WEIGHTS = leggauss(32)
+
+
+def direct(altitude, normal=False, height=None):
     # A uniformly bright solar disk, integrated in solid angle. No refraction
     # or parallax is applied to the geometric solar-centre altitude.
-    nodes, weights = leggauss(12)
+    height = MODEL['observerHeight'] if height is None else height
     radius = np.deg2rad(MODEL["sunAngularRadiusDegrees"])
-    cos_delta = 1 - (nodes + 1) / 2 * (1 - np.cos(radius))
+    cos_delta = 1 - (DISK_NODES + 1) / 2 * (1 - np.cos(radius))
     phi = (np.arange(24) + 0.5) * 2 * np.pi / 24
-    angle = np.deg2rad(altitude)
-    mu = (
-        np.sin(angle) * cos_delta[:, None]
-        + np.cos(angle) * np.sqrt(1 - cos_delta[:, None] ** 2) * np.cos(phi)
-    ).ravel()
-    disk_weights = np.broadcast_to(weights[:, None] / 48, (12, 24)).ravel()
-    visible = mu > 0  # horizontal receiver; rays below its plane contribute zero
-    mu, disk_weights = mu[visible], disk_weights[visible]
-    if not len(mu):
-        return np.zeros(3)
-    r = MODEL["planetRadius"] + MODEL["observerHeight"]
-    optical = np.zeros((len(mu), 3))
-    nodes, weights = leggauss(32)
-    start = np.zeros_like(mu)
-    # Split at ozone profile corners; each segment is smooth.
-    for height in [10000, 25000, 40000, MODEL["atmosphereHeight"]]:
-        end = -r * mu + np.sqrt(
-            (r * mu) ** 2 + (MODEL["planetRadius"] + height) ** 2 - r**2
-        )
-        t = start[:, None] + (end - start)[:, None] * (nodes + 1) / 2
-        h = np.sqrt(r**2 + 2 * r * mu[:, None] * t + t**2) - MODEL["planetRadius"]
-        ds = (end - start)[:, None] * weights / 2
-        optical[:, 0] += (
-            np.sum(ds * np.exp(-h / MODEL["rayleighScaleHeight"]), axis=1)
-            / MODEL["rayleighScaleHeight"]
-        )
-        optical[:, 1] += (
-            np.sum(ds * np.exp(-h / MODEL["aerosolScaleHeight"]), axis=1)
-            / MODEL["aerosolScaleHeight"]
-        )
-        optical[:, 2] += (
-            np.sum(ds * np.maximum(0, 1 - np.abs(h - 25000) / 15000), axis=1) / 15000
-        )
-        start = end
-    transmission = np.exp(
-        -optical[:, :1] * rayleigh_tau
-        - optical[:, 1:2] * MODEL["aerosolOpticalDepth"]
-        - optical[:, 2:] * ozone_tau
-    )
-    spectrum = solar * ((disk_weights * (1 if normal else mu)) @ transmission)
-    xyz = np.trapezoid(spectrum[:, None] * observer.values, wavelengths, axis=0) * 683
-    # Use the same matrix as upstream, avoiding mismatched RGB/XYZ conventions.
-    return XYZ_TO_RGB @ xyz
+    disk_weights = np.broadcast_to(DISK_WEIGHTS[:, None] / 48, (12, 24)).ravel()
+    disk_x = np.broadcast_to(cos_delta[:, None], (12, 24)).ravel()
+    disk_y = (np.sqrt(1 - cos_delta[:, None] ** 2) * np.cos(phi)).ravel()
+    planet = MODEL['planetRadius']
+    r = planet + height
+    horizon = -np.sqrt(height * (2 * planet + height)) / r
+    # Trapezoidal spectral integration, then the same RGB/XYZ convention as upstream.
+    spectral_weights = np.ones(len(wavelengths))
+    spectral_weights[[0, -1]] = .5
+    rgb_weights = (observer.values * (solar * spectral_weights * 683)[:, None]) @ XYZ_TO_RGB.T
+    angles = np.atleast_1d(np.deg2rad(altitude))
+    result = np.zeros((len(angles), 3))
+    for first in range(0, len(angles), 8):
+        angle = angles[first:first + 8, None]
+        directions = np.sin(angle) * disk_x + np.cos(angle) * disk_y
+        visible = directions > horizon
+        if not normal:
+            visible &= directions > 0
+        rows, columns = np.nonzero(visible)
+        mu = directions[rows, columns]
+        if not len(mu):
+            continue
+        t = r * mu
+        top = MODEL['atmosphereHeight']
+        end = -t + np.sqrt(np.maximum(0, t * t + (top - height) * (2 * planet + top + height)))
+        # Split both sides of the tangent point and every ozone profile corner.
+        bounds = [np.zeros_like(t), end, np.clip(-t, 0, end)]
+        for boundary in [10000, 25000, 40000]:
+            discriminant = t * t + (boundary - height) * (2 * planet + boundary + height)
+            root = np.sqrt(np.maximum(0, discriminant))
+            for sign in [-1, 1]:
+                bounds.append(np.where(discriminant >= 0, np.clip(-t + sign * root, 0, end), 0))
+        bounds = np.sort(bounds, axis=0)
+        optical = np.zeros((len(mu), 3))
+        for start, stop in zip(bounds, bounds[1:]):
+            if not np.any(stop > start):
+                continue
+            distance = start[:, None] + (stop - start)[:, None] * (OPTICAL_NODES + 1) / 2
+            h = np.sqrt(r * r + 2 * t[:, None] * distance + distance * distance) - planet
+            ds = (stop - start)[:, None] * OPTICAL_WEIGHTS / 2
+            optical[:, 0] += np.sum(ds * np.exp(-h / MODEL['rayleighScaleHeight']), axis=1) / MODEL['rayleighScaleHeight']
+            optical[:, 1] += np.sum(ds * np.exp(-h / MODEL['aerosolScaleHeight']), axis=1) / MODEL['aerosolScaleHeight']
+            optical[:, 2] += np.sum(ds * np.maximum(0, 1 - np.abs(h - 25000) / 15000), axis=1) / 15000
+        transmission = np.exp(-optical[:, :1] * rayleigh_tau
+                              - optical[:, 1:2] * MODEL['aerosolOpticalDepth']
+                              - optical[:, 2:] * ozone_tau)
+        contributions = (transmission @ rgb_weights) * (disk_weights[columns] * (1 if normal else mu))[:, None]
+        np.add.at(result[first:first + len(angle)], rows, contributions)
+    return result[0] if np.ndim(altitude) == 0 else result
 
 
 XYZ_TO_RGB = np.array(
@@ -513,10 +531,14 @@ def adaptive_samples(angles, rgb, max_error, relative=False):
 
 
 def surface_irradiance(angles, sky, sun, args):
-    values = np.maximum(0, np.column_stack((sky, sun)))
-    knots = adaptive_samples(angles, values, args.max_error / 2, relative=True)[:, 0]
-    sampled = np.column_stack([np.interp(knots, angles, values[:, i]) for i in range(6)])
-    return np.column_stack((knots, sampled)).astype(np.float32)
+    values = np.maximum(0, np.concatenate((sky, sun), axis=-1))
+    columns = values.transpose(1, 0, 2).reshape(len(angles), -1)
+    knots = adaptive_samples(angles, columns, args.max_error / 2, relative=True)[:, 0]
+    sampled = np.array([
+        [np.interp(knots, angles, row[:, i]) for i in range(6)] for row in values
+    ]).transpose(0, 2, 1)
+    coordinates = np.broadcast_to(knots[None, :, None], (*sampled.shape[:2], 1))
+    return np.concatenate((coordinates, sampled), axis=-1).astype(np.float32)
 
 
 def atmosphere_sources(spectral, transform):
@@ -552,6 +574,7 @@ def main():
     parser.add_argument("--wavelengths", type=int, default=48)
     parser.add_argument("--orders", type=int, default=8)
     parser.add_argument("--resolution", type=int, choices=[1, 2], default=1)
+    parser.add_argument('--irradiance-heights', type=int, default=65)
     parser.add_argument("--output", type=Path, default=ROOT / "src/lighting-lut.zip")
     parser.add_argument('--transport-size', type=int, nargs=5, default=[9, 9, 13, 13, 5], help='Height, view, distance, sun and azimuth knots')
     parser.add_argument('--integration-cells', type=int, default=256)
@@ -567,6 +590,8 @@ def main():
     args = parser.parse_args()
     if any(not 3 <= n <= 256 for n in args.transport_size) or args.integration_cells < 16:
         parser.error('Use 3..256 transport knots and at least 16 integration cells')
+    if not 2 <= args.irradiance_heights <= 256:
+        parser.error('Use 2..256 irradiance height knots')
     if not np.isfinite(args.max_error) or args.max_error <= 0:
         parser.error('max-error must be finite and positive')
     context = create_context()
@@ -578,18 +603,24 @@ def main():
             "Use 6..96 wavelengths (a multiple of three), and at least two orders"
         )
     source, sizes = load_sources(args.cache, args.resolution)
-    altitudes = np.concatenate(
-        (np.arange(-24, 10, 0.03125), np.arange(10, 90.25, 0.25))
-    )
+    heights = MODEL['atmosphereHeight'] * np.linspace(0, 1, args.irradiance_heights) ** 2
+    dips = np.rad2deg(np.arccos(MODEL['planetRadius'] / (MODEL['planetRadius'] + heights)))
+    # Align the finite solar disk's Earth-occlusion boundary across height rows.
+    altitudes = np.concatenate((
+        np.arange(-24, 10, 0.03125),
+        np.arange(10, np.ceil(90 + dips[-1]) + .25, .25),
+    ))
     try:
-        sky, spectral = diffuse(context, source, sizes, altitudes, args.wavelengths, args.orders)
+        sky, spectral, reference_sky = diffuse(
+            context, source, sizes, altitudes,
+            args.wavelengths, args.orders, args.irradiance_heights,
+        )
     finally:
         context.release()
-    sun = np.array([direct(altitude) for altitude in altitudes])
-    total = sun + sky
-    if not np.all(np.isfinite(total)):
+    reference_total = direct(90) + reference_sky
+    if not np.all(np.isfinite(sky)) or not np.all(np.isfinite(reference_total)):
         raise ValueError("Nonfinite irradiance")
-    reference_xyz = np.linalg.solve(XYZ_TO_RGB, total[-1])
+    reference_xyz = np.linalg.solve(XYZ_TO_RGB, reference_total)
     d65 = colour.xy_to_XYZ(
         colour.CCS_ILLUMINANTS["CIE 1931 2 Degree Standard Observer"]["D65"]
     )
@@ -598,8 +629,14 @@ def main():
     )
     transform = XYZ_TO_RGB @ adaptation @ np.linalg.inv(XYZ_TO_RGB) / reference_xyz[1]
     # The rounded upstream RGB matrix does not map D65 to exactly (1,1,1).
-    transform = transform / (transform @ total[-1])[:, None]
-    direct_normal = np.array([direct(altitude, normal=True) for altitude in altitudes]) @ transform.T
+    transform = transform / (transform @ reference_total)[:, None]
+    direct_normal = []
+    for height, dip in zip(heights, dips):
+        print(f'Irradiance height: {height:.1f} m', flush=True)
+        direct_normal.append(
+            direct(np.minimum(90, altitudes - dip), normal=True, height=height) @ transform.T
+        )
+    direct_normal = np.array(direct_normal)
     irradiance = surface_irradiance(altitudes, sky @ transform.T, direct_normal, args)
     from atmosphere_binary import lighting_zip
     from atmosphere_direct import build, solar_boundary
@@ -607,10 +644,12 @@ def main():
     radiance, optical, _ = build(multiple, beam, extinction, tuple(args.transport_size), args.integration_cells)
     solar_radiance, solar_radius = solar_boundary(solar_irradiance, MODEL['sunAngularRadiusDegrees'])
     parameters = {name: getattr(args, name) for name in
-                  ['wavelengths', 'orders', 'resolution', 'transport_size', 'integration_cells', 'max_error']}
+                   ['wavelengths', 'orders', 'resolution', 'transport_size', 'integration_cells', 'max_error', 'irradiance_heights']}
     metadata = {'gridSize': args.transport_size, 'solarRadiance': solar_radiance.tolist(),
                 'solarAngularRadius': solar_radius, 'mieG': MODEL['aerosolPhaseParameter'],
-                'skyReference': float((sky[-1] @ transform.T) @ [0.2126, 0.7152, 0.0722]),
+                 'skyReference': float((reference_sky @ transform.T) @ [0.2126, 0.7152, 0.0722]),
+                 'irradianceHeightCount': args.irradiance_heights,
+                 'irradianceHeightMax': MODEL['atmosphereHeight'],
                 'generation': {'parameters': parameters, 'model': MODEL}}
     archive = lighting_zip(radiance, optical, irradiance, metadata)
     if args.check:

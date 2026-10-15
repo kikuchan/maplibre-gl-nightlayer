@@ -6,6 +6,8 @@ export type LUTMetadata = {
   solarAngularRadius: number;
   mieG: number;
   skyReference: number;
+  irradianceHeightCount: number;
+  irradianceHeightMax: number;
 };
 
 type LUTData = {
@@ -97,6 +99,15 @@ async function readLUT(source?: string): Promise<LUTData> {
     metadata.skyReference <= 0
   )
     throw new Error('Invalid LUT metadata');
+  if (
+    !Number.isSafeInteger(metadata.irradianceHeightCount) ||
+    metadata.irradianceHeightCount < 2 ||
+    metadata.irradianceHeightCount > 256 ||
+    !Number.isFinite(metadata.irradianceHeightMax) ||
+    metadata.irradianceHeightMax <= 0 ||
+    metadata.irradianceHeightMax > 100000
+  )
+    throw new Error('Invalid irradiance height grid');
   function floats(name: string): Float32Array<ArrayBuffer> {
     const entry = entries.get(name);
     if (!entry || entry.length % 4 !== 0) throw new Error(`Invalid LUT array: ${name}`);
@@ -113,17 +124,24 @@ async function readLUT(source?: string): Promise<LUTData> {
   const mie = floats('mie.bin');
   const optical = floats('optical.bin');
   const [h, v, d, s, a] = metadata.gridSize;
+  const heightCount = metadata.irradianceHeightCount;
+  const solarCount = irradiance.length / (7 * heightCount);
   if (
     entries.size !== 5 ||
-    irradiance.length < 14 ||
-    irradiance.length % 7 !== 0 ||
+    !Number.isSafeInteger(solarCount) ||
+    solarCount < 2 ||
     rayleigh.length !== 2 * h * v * d * s * a * 3 ||
     mie.length !== rayleigh.length ||
     optical.length !== 2 * h * v * d * 3
   )
     throw new Error('Invalid LUT dimensions');
-  for (let i = 0; i < irradiance.length; i += 7)
-    if (i > 0 && irradiance[i] <= irradiance[i - 7]) throw new Error('Invalid irradiance coordinates');
+  for (let row = 0; row < heightCount; row++) {
+    for (let column = 0; column < solarCount; column++) {
+      const i = (row * solarCount + column) * 7;
+      if ((column > 0 && irradiance[i] <= irradiance[i - 7]) || irradiance[i] !== irradiance[column * 7])
+        throw new Error('Invalid irradiance coordinates');
+    }
+  }
   if (optical.some((v) => v < 0)) throw new Error('Negative optical coefficient');
   return { metadata, irradiance, rayleigh, mie, optical };
 }
@@ -211,17 +229,20 @@ export async function uploadLUT(
     if (2 * h > gl.getParameter(gl.MAX_3D_TEXTURE_SIZE)) throw new Error('Optical LUT exceeds GPU limits');
     texture(gl.TEXTURE_3D);
     gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB32F, d, v, 2 * h, 0, gl.RGB, gl.FLOAT, lut.optical);
-    const count = lut.irradiance.length / 7;
-    if (count > gl.getParameter(gl.MAX_TEXTURE_SIZE)) throw new Error('Irradiance LUT exceeds GPU limits');
-    const irradiance = new Float32Array(count * 8);
-    for (let i = 0; i < count; i++) {
+    const heightCount = lut.metadata.irradianceHeightCount;
+    const samples = lut.irradiance.length / 7;
+    const count = samples / heightCount;
+    const limit = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    if (count > limit || 2 * heightCount > limit) throw new Error('Irradiance LUT exceeds GPU limits');
+    const irradiance = new Float32Array(samples * 8);
+    for (let i = 0; i < samples; i++) {
       irradiance.set(lut.irradiance.subarray(i * 7 + 1, i * 7 + 4), i * 4);
       irradiance[i * 4 + 3] = lut.irradiance[i * 7];
-      irradiance.set(lut.irradiance.subarray(i * 7 + 4, i * 7 + 7), (count + i) * 4);
-      irradiance[(count + i) * 4 + 3] = lut.irradiance[i * 7];
+      irradiance.set(lut.irradiance.subarray(i * 7 + 4, i * 7 + 7), (samples + i) * 4);
+      irradiance[(samples + i) * 4 + 3] = lut.irradiance[i * 7];
     }
     texture(gl.TEXTURE_2D);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, count, 2, 0, gl.RGBA, gl.FLOAT, irradiance);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, count, 2 * heightCount, 0, gl.RGBA, gl.FLOAT, irradiance);
     if (gl.getError() !== gl.NO_ERROR) throw new Error('Failed to upload LUT textures');
     return {
       metadata: lut.metadata,

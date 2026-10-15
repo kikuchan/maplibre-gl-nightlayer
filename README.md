@@ -30,6 +30,8 @@ map.on('load', () => {
     twilightAttenuation: 1,
     updateInterval: 10000,
     atmosphere: 0,
+    exposure: 0,
+    autoExposure: false,
   }));
 });
 ```
@@ -64,6 +66,8 @@ type Options = {
   twilightAttenuation?: number;
   updateInterval?: number;
   atmosphere?: number;
+  exposure?: number;
+  autoExposure?: boolean;
   lut?: string | URL;
 };
 
@@ -99,6 +103,12 @@ export class NightLayer implements CustomLayerInterface {
   getAtmosphere(): number;
   setAtmosphere(atmosphere: number): void;
 
+  getExposure(): number;
+  setExposure(exposure: number): void;
+
+  getAutoExposure(): boolean;
+  setAutoExposure(enabled: boolean): void;
+
     :
 };
 
@@ -110,3 +120,7 @@ export function getSubsolarPoint(date?: Date | null): {
 ```
 
 The default LUT is embedded. Use `lut` to load a custom LUT ZIP by URL. Requires `OES_texture_float_linear`.
+
+`exposure` adjusts brightness before tone mapping, from -12 to +12 stops (default: 0). Each +1 stop doubles the light.
+
+`autoExposure` enables gradual, center-weighted scene metering (default: false). `exposure` then acts as compensation; automatic adjustment is limited to -4 through +8 stops.

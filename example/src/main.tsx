@@ -61,11 +61,15 @@ function App() {
   const [globe, setGlobe] = createSignal(query.get('projection') !== 'mercator');
   const [basemap, setBasemap] = createSignal<Basemap>(query.get('basemap') === 'osm' ? 'osm' : 'satellite');
   const [atmosphere, setAtmosphere] = createSignal(numberParam('atmosphere', 1, 0, 1));
+  const [exposure, setExposure] = createSignal(numberParam('exposure', 0, -12, 12));
+  const [autoExposure, setAutoExposure] = createSignal(query.get('autoExposure') === 'true');
   const [terrain, setTerrain] = createSignal(query.get('terrain') === 'true');
 
   const [animating, setAnimating] = createSignal(false);
   const [editing, setEditing] = createSignal(false);
   const [now, setNow] = createSignal(Date.now());
+  let copyView = async () => {};
+  let loadView = () => {};
 
   onMount(() => {
     const map = new maplibregl.Map({
@@ -130,33 +134,119 @@ function App() {
     const nightLayer = new NightLayer({
       opacity: opacity(),
       atmosphere: atmosphere(),
+      exposure: exposure(),
+      autoExposure: autoExposure(),
       updateInterval: 10000,
     });
+
+    const captureView = () => {
+      const center = map.getCenter();
+      const date = timeAnimating();
+      return {
+        center: [Number(center.lng.toFixed(8)), Number(center.lat.toFixed(8))],
+        zoom: Number(map.getZoom().toFixed(3)),
+        pitch: Number(map.getPitch().toFixed(3)),
+        bearing: Number(map.getBearing().toFixed(3)),
+        roll: Number(map.getRoll().toFixed(3)),
+        projection: globe() ? 'globe' : 'mercator',
+        basemap: basemap(),
+        terrain: terrain(),
+        atmosphere: Number(atmosphere().toFixed(3)),
+        exposure: Number(exposure().toFixed(3)),
+        autoExposure: autoExposure(),
+        opacity: Number(opacity().toFixed(3)),
+        twilights: twilights(),
+        timelineZoom: Number(zoom().toFixed(2)),
+        date: date === null ? null : Number(date.toFixed(0)),
+      };
+    };
+    copyView = async () => {
+      const json = JSON.stringify(captureView());
+      try {
+        await navigator.clipboard.writeText(json);
+      } catch {
+        window.prompt('Copy view JSON', json);
+      }
+    };
+    loadView = () => {
+      const text = window.prompt('Load view JSON');
+      if (text === null) return;
+      try {
+        const view = JSON.parse(text);
+        const inRange = (value: unknown, min: number, max: number): value is number =>
+          typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
+        if (!view || typeof view !== 'object' || Array.isArray(view)) throw new Error('Invalid view JSON');
+        const roll = view.roll === undefined ? 0 : view.roll;
+        const timelineZoom = view.timelineZoom === undefined ? zoom() : view.timelineZoom;
+        const basemapValue = view.basemap === undefined ? basemap() : view.basemap;
+        const exposureValue = view.exposure === undefined ? 0 : view.exposure;
+        const autoExposureValue = view.autoExposure === undefined ? false : view.autoExposure;
+        const date = typeof view.date === 'string' ? Date.parse(view.date) / 1000 : view.date;
+        if (
+          !Array.isArray(view.center) ||
+          view.center.length !== 2 ||
+          !inRange(view.center[0], -Infinity, Infinity) ||
+          !inRange(view.center[1], -90, 90) ||
+          !inRange(view.zoom, map.getMinZoom(), map.getMaxZoom()) ||
+          !inRange(view.pitch, map.getMinPitch(), map.getMaxPitch()) ||
+          !inRange(view.bearing, -Infinity, Infinity) ||
+          !inRange(roll, -Infinity, Infinity) ||
+          !['globe', 'mercator'].includes(view.projection) ||
+          !['satellite', 'osm'].includes(basemapValue) ||
+          typeof view.terrain !== 'boolean' ||
+          !inRange(view.atmosphere, 0, 1) ||
+          !inRange(exposureValue, -12, 12) ||
+          typeof autoExposureValue !== 'boolean' ||
+          !inRange(view.opacity, 0, 1) ||
+          !Number.isInteger(view.twilights) ||
+          !inRange(view.twilights, 0, 4) ||
+          !inRange(timelineZoom, -35, 10) ||
+          (date !== null && !inRange(date, -DATE_RANGE_SECONDS, DATE_RANGE_SECONDS))
+        )
+          throw new Error('Invalid view values');
+        setGlobe(view.projection === 'globe');
+        setBasemap(basemapValue);
+        setTerrain(view.terrain);
+        setAtmosphere(view.atmosphere);
+        setExposure(exposureValue);
+        setAutoExposure(autoExposureValue);
+        setOpacity(view.opacity);
+        setTwilights(view.twilights);
+        setZoom(timelineZoom);
+        const selectedTime = date === null ? null : Decimal(date);
+        setTime(selectedTime);
+        setTimeAnimating(selectedTime);
+        map.jumpTo({ center: view.center, zoom: view.zoom, pitch: view.pitch, bearing: view.bearing, roll });
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : 'Invalid view JSON');
+      }
+    };
 
     let urlTimer: ReturnType<typeof setTimeout>;
     const refreshURL = () => {
       clearTimeout(urlTimer);
       urlTimer = setTimeout(() => {
         const url = new URL(location.href);
-        const center = map.getCenter();
+        const view = captureView();
         const values = {
-          center: `${center.lng.toFixed(8)},${center.lat.toFixed(8)}`,
-          zoom: map.getZoom().toFixed(3),
-          pitch: map.getPitch().toFixed(3),
-          bearing: map.getBearing().toFixed(3),
-          roll: map.getRoll().toFixed(3),
-          projection: globe() ? 'globe' : 'mercator',
-          basemap: basemap(),
-          terrain: terrain(),
-          atmosphere: atmosphere().toFixed(3),
-          opacity: opacity().toFixed(3),
-          twilights: twilights().toFixed(0),
-          timelineZoom: zoom().toFixed(2),
+          center: view.center.map((value) => value.toFixed(8)).join(','),
+          zoom: view.zoom.toFixed(3),
+          pitch: view.pitch.toFixed(3),
+          bearing: view.bearing.toFixed(3),
+          roll: view.roll.toFixed(3),
+          projection: view.projection,
+          basemap: view.basemap,
+          terrain: view.terrain,
+          atmosphere: view.atmosphere.toFixed(3),
+          exposure: view.exposure.toFixed(3),
+          autoExposure: view.autoExposure,
+          opacity: view.opacity.toFixed(3),
+          twilights: view.twilights.toFixed(0),
+          timelineZoom: view.timelineZoom.toFixed(2),
         };
         for (const [key, value] of Object.entries(values)) url.searchParams.set(key, String(value));
-        const date = timeAnimating();
-        if (date === null) url.searchParams.delete('date');
-        else url.searchParams.set('date', date.toFixed(0));
+        if (view.date === null) url.searchParams.delete('date');
+        else url.searchParams.set('date', view.date.toFixed(0));
         if (url.href !== location.href) history.replaceState(history.state, '', url);
       }, 200);
     };
@@ -166,6 +256,8 @@ function App() {
       basemap();
       terrain();
       atmosphere();
+      exposure();
+      autoExposure();
       opacity();
       twilights();
       timeAnimating();
@@ -185,6 +277,12 @@ function App() {
 
     effect(() => {
       nightLayer.setOpacity(opacity());
+    });
+    effect(() => {
+      nightLayer.setExposure(exposure());
+    });
+    effect(() => {
+      nightLayer.setAutoExposure(autoExposure());
     });
 
     effect(() => {
@@ -275,6 +373,14 @@ function App() {
       </div>
       <div class="popup display-controls">
         <div>
+          <button id="copy-view" type="button" onclick={() => copyView()}>
+            COPY
+          </button>
+          <button id="load-view" type="button" onclick={() => loadView()}>
+            LOAD
+          </button>
+        </div>
+        <div>
           <label for="atmosphere-blend">Atmosphere</label>
           <input
             id="atmosphere-blend"
@@ -286,6 +392,33 @@ function App() {
             oninput={(e: Event) => setAtmosphere(Number((e.currentTarget as HTMLInputElement).value))}
           />
           <output for="atmosphere-blend">{() => atmosphere().toFixed(2)}</output>
+        </div>
+        <div>
+          <span id="auto-exposure-label">Auto exposure</span>
+          <button
+            id="btn-auto-exposure"
+            type="button"
+            class="toggle-switch"
+            role="switch"
+            aria-labelledby="auto-exposure-label"
+            aria-checked={autoExposure}
+            onclick={() => setAutoExposure((v) => !v)}
+          >
+            <span class="toggle-track" aria-hidden="true" />
+          </button>
+        </div>
+        <div>
+          <label for="exposure">{() => (autoExposure() ? 'Exposure comp.' : 'Exposure')}</label>
+          <input
+            id="exposure"
+            type="range"
+            min="-12"
+            max="12"
+            step="0.1"
+            value={exposure}
+            oninput={(e: Event) => setExposure(Number((e.currentTarget as HTMLInputElement).value))}
+          />
+          <output for="exposure">{() => `${exposure() > 0 ? '+' : ''}${exposure().toFixed(1)} stops`}</output>
         </div>
         <div>
           <label for="layer-opacity">Layer opacity</label>
@@ -306,8 +439,11 @@ function App() {
             id="twilight-steps"
             value={twilights}
             ref={(select) =>
-              queueMicrotask(() => {
-                (select as HTMLSelectElement).value = String(twilights());
+              effect(() => {
+                const value = String(twilights());
+                queueMicrotask(() => {
+                  (select as HTMLSelectElement).value = value;
+                });
               })
             }
             onchange={(e: Event) => setTwilights(Number((e.currentTarget as HTMLSelectElement).value))}
@@ -325,8 +461,11 @@ function App() {
             id="basemap"
             value={basemap}
             ref={(select) =>
-              queueMicrotask(() => {
-                (select as HTMLSelectElement).value = basemap();
+              effect(() => {
+                const value = basemap();
+                queueMicrotask(() => {
+                  (select as HTMLSelectElement).value = value;
+                });
               })
             }
             onchange={(e: Event) => setBasemap((e.currentTarget as HTMLSelectElement).value as Basemap)}

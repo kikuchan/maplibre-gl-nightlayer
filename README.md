@@ -1,6 +1,10 @@
 # A Night Layer for MapLibre GL JS
 
 Adds a simple night shadow (Earth's shadow) on the map.
+
+> [!WARNING]
+> This package relies on MapLibre GL JS internals. Compatibility may break even in minor or patch releases.
+
 ![image](https://github.com/user-attachments/assets/425f58e0-66f6-4779-8c03-ff543972c59e)
 
 ## Demo

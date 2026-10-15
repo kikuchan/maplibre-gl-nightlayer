@@ -1,4 +1,5 @@
 import type { CustomLayerInterface, CustomRenderMethodInput, Map as MaplibreMap } from 'maplibre-gl';
+import { MercatorCoordinate } from 'maplibre-gl';
 import { uploadLUT, type LUTMetadata } from './lut.js';
 
 type Color3 = [number, number, number];
@@ -54,13 +55,10 @@ function premultiply(color: Color4): number[] {
   return [r ** 2.2 * a, g ** 2.2 * a, b ** 2.2 * a, a];
 }
 
-function atmosphereCamera(map: MaplibreMap, projection: CustomRenderMethodInput['defaultProjectionData']) {
-  const transform = map.painter.frameRenderContext.transform as unknown as {
-    projectionMatrix: ArrayLike<number>;
-    pixelsPerMeter: number;
-    worldSize: number;
-  };
-  const p = transform.projectionMatrix;
+function atmosphereCamera(map: MaplibreMap, options: CustomRenderMethodInput) {
+  const projection = options.defaultProjectionData;
+  const p = options.projectionMatrix;
+  const kilometres = 1 / (MercatorCoordinate.fromLngLat(map.getCenter()).meterInMercatorCoordinateUnits() * 1000);
   const inverse = [
     1 / p[0],
     0,
@@ -107,7 +105,6 @@ function atmosphereCamera(map: MaplibreMap, projection: CustomRenderMethodInput[
         Math.sin(latitude),
         Math.cos(longitude) * Math.cos(latitude),
       ];
-      const kilometres = transform.worldSize / transform.pixelsPerMeter / 1000;
       const origin = up.map((n) => n * (6371 + position[2] * kilometres));
       return {
         origin,
@@ -124,7 +121,6 @@ function atmosphereCamera(map: MaplibreMap, projection: CustomRenderMethodInput[
     mercator && globe
       ? mercator.origin.map((n, i) => n + (globe.origin[i] - n) * transition)
       : (mercator ?? globe)!.origin;
-  const kilometres = transform.worldSize / transform.pixelsPerMeter / 1000;
   let mercatorView = Array(9).fill(0);
   if (mercator) {
     const radius = Math.hypot(...mercator.origin);
@@ -150,7 +146,7 @@ function atmosphereCamera(map: MaplibreMap, projection: CustomRenderMethodInput[
     mercatorView,
     globeView: globe?.inverseView.map((n) => n * 6371) ?? Array(9).fill(0),
     mercatorPosition: mercator?.position ?? [0, 0, 0],
-    mercatorKilometres: transform.worldSize / transform.pixelsPerMeter / 1000,
+    mercatorKilometres: kilometres,
   };
 }
 
@@ -295,13 +291,13 @@ export class NightLayer implements CustomLayerInterface {
         this.#lutTextures = textures;
         this.#lutMetadata = metadata;
         this.#lutTiles = tiles;
-        map.painter.frameRenderContext.context.setDirty();
+        map.painter.context.setDirty();
         this.#repaint();
       })
       .catch((error) => {
         if (this.#attachment === attachment) map.fire('error', { error });
       })
-      .finally(() => map.painter.frameRenderContext.context.setDirty());
+      .finally(() => map.painter.context.setDirty());
     map.on('sourcedata', this.#invalidateSurface);
     map.on('terrain', this.#invalidateSurface);
     this.#setIntervalTimer();
@@ -450,8 +446,8 @@ export class NightLayer implements CustomLayerInterface {
     gl.clearColor(0, 0, 0, 0);
     gl.clearDepth(1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    this.#skyRenderer!.render(this.#map, gl, projection);
-    this.#groundRenderer!.render(this.#map, gl, projection);
+    this.#skyRenderer!.render(this.#map, gl, options);
+    this.#groundRenderer!.render(this.#map, gl, options);
     const terrain = this.#map.getTerrain();
     const source = terrain ? this.#map.getSource(terrain.source) : undefined;
     const tileSize = source && 'tileSize' in source ? (source.tileSize ?? 512) * 2 : 256;
@@ -460,7 +456,7 @@ export class NightLayer implements CustomLayerInterface {
       roundZoom: !terrain,
       ...(terrain ? { terrain: this.#map.terrain, minzoom: 0, maxzoom: 22 } : {}),
     });
-    this.#surfaceRenderer.render(this.#map, gl, tiles);
+    this.#surfaceRenderer.render(this.#map, gl, tiles, options);
     this.#surfaceReady = true;
     this.#surfaceSignature = signature;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -492,14 +488,14 @@ export class NightLayer implements CustomLayerInterface {
     ]);
     gl.uniform1fv(gl.getUniformLocation(program, 'u_thresholds[0]'), THRESHOLDS);
     gl.uniform2f(gl.getUniformLocation(program, 'u_viewport'), gl.drawingBufferWidth, gl.drawingBufferHeight);
-    const projectionMatrix = this.#map!.painter.frameRenderContext.transform.projectionMatrix;
+    const projectionMatrix = options.projectionMatrix;
     gl.uniform1f(
       gl.getUniformLocation(program, 'u_max_sun_edge'),
       2 / (Math.abs(projectionMatrix[5]) * gl.drawingBufferHeight),
     );
     this.#copyMapColor(gl);
     const layout = this.#lutMetadata!;
-    const camera = atmosphereCamera(this.#map!, options.defaultProjectionData);
+    const camera = atmosphereCamera(this.#map!, options);
     const mercatorWeight = Math.max(0, Math.min(1, 1 - options.defaultProjectionData.projectionTransition));
     gl.uniform1f(gl.getUniformLocation(program, 'u_atmosphere_strength'), this.#atmosphere);
     gl.uniform1f(gl.getUniformLocation(program, 'u_sky_reference'), layout.skyReference);
@@ -887,13 +883,10 @@ class AtmosphereSurface {
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indexData), gl.STATIC_DRAW);
   }
 
-  render(
-    map: MaplibreMap,
-    gl: WebGL2RenderingContext,
-    projection: CustomRenderMethodInput['defaultProjectionData'],
-  ): void {
+  render(map: MaplibreMap, gl: WebGL2RenderingContext, options: CustomRenderMethodInput): void {
+    const projection = options.defaultProjectionData;
     const transition = Math.max(0, Math.min(1, projection.projectionTransition));
-    const camera = atmosphereCamera(map, projection);
+    const camera = atmosphereCamera(map, options);
     const { origin } = camera;
     const centreLongitude = Math.atan2(origin[0], origin[2]);
     const cameraRadius = Math.hypot(...origin);
@@ -949,7 +942,7 @@ class AtmosphereSurface {
     gl.depthMask(false);
     gl.drawElements(gl.TRIANGLES, steps * ATMOSPHERE_AZIMUTH_STEPS * 6, gl.UNSIGNED_SHORT, 0);
     // Terrain overwrites the positions; its cleared native depth buffer is untouched.
-    map.painter.frameRenderContext.context.setDirty();
+    map.painter.context.setDirty();
   }
 
   dispose(gl: WebGL2RenderingContext): void {
@@ -1016,17 +1009,14 @@ class SeaLevelSurface {
     }
   }
 
-  render(
-    map: MaplibreMap,
-    gl: WebGL2RenderingContext,
-    projection: CustomRenderMethodInput['defaultProjectionData'],
-  ): void {
-    const camera = atmosphereCamera(map, projection);
+  render(map: MaplibreMap, gl: WebGL2RenderingContext, options: CustomRenderMethodInput): void {
+    const projection = options.defaultProjectionData;
+    const camera = atmosphereCamera(map, options);
     if (projection.projectionTransition > 0) {
       // Geographic coverage does not require any loaded source tiles. Reuse the
       // native world mesh, including its poles and globe-side clipping, at 0 m.
       const tiles = map.coveringTiles({ tileSize: 512, minzoom: 0, maxzoom: 0 });
-      this.#sphere.render(map, gl, tiles, true);
+      this.#sphere.render(map, gl, tiles, options, true);
       return;
     }
     const { mercatorPosition } = camera;
@@ -1062,7 +1052,7 @@ class SeaLevelSurface {
     gl.disable(gl.DEPTH_TEST);
     gl.depthMask(false);
     gl.drawArrays(gl.TRIANGLES, 0, ground.length);
-    map.painter.frameRenderContext.context.setDirty();
+    map.painter.context.setDirty();
   }
 
   dispose(gl: WebGL2RenderingContext): void {
@@ -1073,14 +1063,13 @@ class SeaLevelSurface {
   }
 }
 
-type Frame = MaplibreMap['painter']['frameRenderContext'];
-type Program = ReturnType<Frame['useProgram']>;
+type Program = ReturnType<MaplibreMap['painter']['programCache']['getProgram']>;
 type Terrain = NonNullable<MaplibreMap['terrain']>;
 type Mesh = ReturnType<Terrain['getTerrainMesh']>;
 type Tile = ReturnType<MaplibreMap['coveringTiles']>[number];
 
 /**
- * MapLibre 6.13 WebGL adapter. Borrow the native meshes and draw machinery;
+ * MapLibre WebGL adapter. Borrow the native meshes and draw machinery;
  * own only the position-output programs and their VAOs. Tile enumeration stays
  * with map.coveringTiles({terrain}), outside this adapter.
  */
@@ -1095,7 +1084,7 @@ class NativeSurface {
       ?.find((shader) => gl.getShaderParameter(shader, gl.SHADER_TYPE) === gl.VERTEX_SHADER);
     const source = shader && gl.getShaderSource(shader);
     if (!source || !source.includes('projectTile')) {
-      throw new Error('NightLayer: unsupported MapLibre terrain vertex shader (expected 6.13 WebGL interface)');
+      throw new Error('NightLayer: unsupported MapLibre terrain vertex shader');
     }
     // Keep the native height sampling, pole handling, skirts and projection
     // intact. The wrapper only adds the geographic direction as a varying.
@@ -1212,7 +1201,12 @@ class NativeSurface {
       const result = Object.create(native) as Program;
       result.program = program;
       const float = gl.getUniformLocation(program, 'u_ele_delta');
-      result.fixedUniforms = { u_ele_delta: { set: (value: number) => gl.uniform1f(float, value) } };
+      result.fixedUniforms = {};
+      if (native.fixedUniforms.u_ele_delta) {
+        const elevation = Object.create(native.fixedUniforms.u_ele_delta) as (typeof native.fixedUniforms)[string];
+        elevation.set = (value: number) => gl.uniform1f(float, value);
+        result.fixedUniforms.u_ele_delta = elevation;
+      }
       result.terrainUniforms = { ...native.terrainUniforms };
       for (const name of ['u_depth', 'u_terrain'] as const) {
         const location = gl.getUniformLocation(program, name);
@@ -1231,25 +1225,42 @@ class NativeSurface {
     }
   }
 
-  render(map: MaplibreMap, gl: WebGL2RenderingContext, tiles: Tile[], seaLevel = false): void {
+  render(
+    map: MaplibreMap,
+    gl: WebGL2RenderingContext,
+    tiles: Tile[],
+    options: CustomRenderMethodInput,
+    seaLevel = false,
+  ): void {
     const terrain = seaLevel ? undefined : map.terrain;
-    const frame = map.painter?.frameRenderContext;
+    const painter = map.painter;
+    const projection = map.style.projection;
     if (
-      !frame?.useProgram ||
-      !frame.getMeshFromTileID ||
+      !painter?.programCache?.getProgram ||
+      !projection?.getMeshFromTileID ||
       (terrain && (!terrain.getTerrainMesh || !terrain.getTerrainData))
     ) {
-      throw new Error('NightLayer: unsupported MapLibre native terrain interface (expected 6.13 WebGL)');
+      throw new Error('NightLayer: unsupported MapLibre native terrain interface');
     }
     if (this.#terrain && this.#terrain !== terrain) this.dispose(gl);
     this.#terrain = terrain;
-    const native = frame.useProgram(terrain ? 'terrainDepth' : 'clippingMask');
+    const native = painter.programCache.getProgram({
+      name: terrain ? 'terrainDepth' : 'clippingMask',
+      projectionShaderVariant: {
+        name: projection.shaderVariantName,
+        define: projection.shaderDefine,
+        prelude: projection.shaderPreludeCode,
+      },
+      showOverdrawInspector: false,
+      useTerrain: !!map.terrain,
+      defines: [],
+    });
     let program = this.#programs.get(native.program);
     if (!program) {
       program = this.#createProgram(gl, native, seaLevel);
       this.#programs.set(native.program, program);
     }
-    const context = frame.context;
+    const context = painter.context;
     context.setDirty();
     const depth = { func: seaLevel ? gl.ALWAYS : gl.LEQUAL, mask: !seaLevel, range: [0, 1] as [number, number] };
     const stencil: Parameters<Program['draw']>[3] = {
@@ -1261,15 +1272,15 @@ class NativeSurface {
       pass: gl.KEEP,
     };
     const colour: Parameters<Program['draw']>[4] = {
-      ...frame.colorModeForRenderPass(),
       blendFunction: [gl.ONE, gl.ZERO],
+      blendColor: context.blendColor.get(),
       mask: [true, true, true, true],
     };
     const cull = { enable: true, mode: gl.BACK, frontFace: gl.CCW };
     for (const tile of tiles) {
       const mesh = terrain
-        ? terrain.getTerrainMesh(tile, frame.data.isRenderingGlobe)
-        : frame.getMeshFromTileID(tile.canonical, false, true, 'raster');
+        ? terrain.getTerrainMesh(tile, options.defaultProjectionData.projectionTransition > 0)
+        : projection.getMeshFromTileID(context, tile.canonical, false, true, 'raster');
       let segments = this.#segments.get(mesh.segments);
       if (!segments) {
         segments = Object.create(mesh.segments) as Mesh['segments'];
@@ -1277,9 +1288,13 @@ class NativeSurface {
         this.#segments.set(mesh.segments, segments);
       }
       const data = terrain?.getTerrainData(tile) ?? null;
-      const projection = frame.getProjectionDataForTile(tile, { applyTerrainMatrix: false });
+      const tileProjection = options.getProjectionData({
+        tileID: tile,
+        applyTerrainMatrix: false,
+        applyGlobeMatrix: true,
+      });
       context.program.set(program.program);
-      gl.uniform4fv(gl.getUniformLocation(program.program, 'u_nightlayer_tile'), projection.tileMercatorCoords);
+      gl.uniform4fv(gl.getUniformLocation(program.program, 'u_nightlayer_tile'), tileProjection.tileMercatorCoords);
       program.draw(
         context,
         gl.TRIANGLES,
@@ -1290,7 +1305,7 @@ class NativeSurface {
         { u_ele_delta: terrain?.getSkirtLength(map.getZoom()) ?? 0 },
         // Native clipping-mask programs have no terrain block and ignore this argument.
         data!,
-        projection,
+        tileProjection,
         'nightlayer-surface',
         mesh.vertexBuffer,
         mesh.indexBuffer,

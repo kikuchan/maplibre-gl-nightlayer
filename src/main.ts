@@ -48,6 +48,7 @@ import {
   type DevelopmentInput,
 } from './receiver.js';
 import { shadowFragment, shadowVertexGLSL, TerrainShadow, TERRAIN_SHADOW_SIZE, ShadowIntervals } from './shadow.js';
+import { ExtrusionRenderer } from './extrusion.js';
 
 export type { DepthSample, Color, Color3, Color4, Twilight, TwilightInput, TwilightSteps } from './surface.js';
 export type { Development, DevelopmentInput, DevelopmentProcess } from './receiver.js';
@@ -111,6 +112,8 @@ export class NightLayer implements CustomLayerInterface {
   #shadowIntervals?: ShadowIntervals;
   #shadowIntervalsReady = false;
   #shadowRenderer?: NativeSurface;
+  #extrusions = new ExtrusionRenderer();
+  #buildings: ReturnType<ExtrusionRenderer['collect']> = [];
   #development: Development | false = false;
   #capture?: { resolve: (blob: Blob) => void; reject: (error: Error) => void; exposure: 'preview' | 'raw' };
   #receiver?: Receiver;
@@ -235,7 +238,7 @@ export class NightLayer implements CustomLayerInterface {
   }
 
   /** Last rendered logical pixel at canvas-relative CSS coordinates (top-left).
-   * Returns ground depth and coverage for each pixel.
+   * Returns the nearest opaque surface depth and coverage for each pixel.
    * Returns null before a valid frame, outside the canvas, or for unsupported CRS. */
   getDepthAt(x: number, y: number): DepthSample | null {
     if (!this.#map || !supportsProjection(this.#map) || !this.#surfaceReady || !this.#surface) return null;
@@ -444,6 +447,8 @@ export class NightLayer implements CustomLayerInterface {
     map.off('webglcontextlost', this.#contextLost);
     this.#surfaceRenderer?.dispose(gl);
     this.#shadowRenderer?.dispose(gl);
+    this.#extrusions.dispose(gl);
+    this.#buildings = [];
     this.#terrainShadow?.dispose(gl);
     this.#shadowSignature = undefined;
     this.#shadowDEMs = [];
@@ -496,7 +501,11 @@ export class NightLayer implements CustomLayerInterface {
     const projection = options.defaultProjectionData;
     const coordinates = this.#map.style.projection?.worldCoordinateHelper;
     if (!coordinates) throw new Error('NightLayer: geographic projection mapping is unavailable');
-    // Rasterize all endpoint types into one inverse LUT; ground writes the stencil.
+    // Only layers already in the native colour at composite time can write endpoints.
+    const layerIds = this.#map.getLayersOrder();
+    const layerIndex = layerIds.indexOf(this.id);
+    const buildings = this.#extrusions.collect(this.#map, layerIds.slice(0, Math.max(0, layerIndex)));
+    this.#buildings = buildings;
     const [width, height] = this.#sensorSize(gl);
     const signature = JSON.stringify([
       width,
@@ -512,6 +521,7 @@ export class NightLayer implements CustomLayerInterface {
       this.#map.getBearing(),
       this.#map.getTerrain(),
       this.#map.getRenderWorldCopies(),
+      buildings.map((building) => building.signature),
     ]);
     if (this.#surfaceReady && signature === this.#surfaceSignature && coordinates === this.#surfaceCoordinates) return;
     if (coordinates !== this.#surfaceCoordinates) this.#shadowSignature = undefined;
@@ -529,7 +539,8 @@ export class NightLayer implements CustomLayerInterface {
     const tiles = this.#map.terrain
       ? this.#map.terrain.tileManager.getRenderableTiles().map((tile) => tile.tileID)
       : this.#map.coveringTiles({ tileSize: 256, roundZoom: true });
-    this.#surfaceRenderer.render(this.#map, gl, tiles, options);
+    this.#surfaceRenderer.render(this.#map, gl, tiles, options, { depth3D: buildings.length > 0 });
+    this.#extrusions.render(this.#map, options, buildings, { camera });
     this.#viewAxis = viewAxis(camera);
     this.#surfaceTiles = tiles;
     this.#surfaceReady = true;
@@ -595,7 +606,8 @@ export class NightLayer implements CustomLayerInterface {
               return tile?.dem ? [tile] : [];
             })
         : [];
-    const mieShadows = fogStrength > 0 && (loaded.length > 0 || !terrain);
+    const buildings = this.#buildings;
+    const mieShadows = fogStrength > 0 && (loaded.length > 0 || !terrain || buildings.length > 0);
     if (mieShadows) {
       // Existing terrain visibility is a local parallel-beam approximation.
       // Its tangent direction follows the same refractive light inverse as
@@ -630,18 +642,13 @@ export class NightLayer implements CustomLayerInterface {
               terrain!.tileManager.deltaZoom,
             )
           : [];
-        this.#terrainShadow!.begin(
-          gl,
-          camera,
-          shadowLight,
-          loaded.map((tile) => ({
-            canonical: tile.tileID.canonical,
-            minElevation: tile.dem!.min * terrain!.exaggeration,
-            maxElevation: tile.dem!.max * terrain!.exaggeration,
-          })),
-        );
-        if (terrain) this.#shadowRenderer!.render(this.#map!, gl, casterTiles, options, this.#terrainShadow!);
-        else this.#terrainShadow!.finish(gl);
+        const terrainMax = loaded.reduce((max, tile) => Math.max(max, tile.dem!.max * terrain!.exaggeration), 0);
+        const casterMax = buildings.reduce((max, building) => Math.max(max, building.maxElevation), terrainMax);
+        this.#terrainShadow!.begin(gl, camera, shadowLight, casterMax);
+        const shadow = this.#terrainShadow!;
+        if (terrain) this.#shadowRenderer!.render(this.#map, gl, casterTiles, options, { shadow });
+        this.#extrusions.render(this.#map, options, buildings, { shadow });
+        this.#terrainShadow!.finish(gl);
         this.#shadowSignature = signature;
         this.#shadowDEMs = loaded.map((tile) => tile.dem!);
         this.#shadowIntervalsReady = false;
@@ -934,7 +941,7 @@ export class NightLayer implements CustomLayerInterface {
           opacityBakedIn: false,
           depthChannel: 'Z',
           depthUnits: 'metres',
-          depthDefinition: 'physical optical-axis distance to the ground sample',
+          depthDefinition: 'physical optical-axis distance to the first surface sample',
           depthInfinity: 'positive infinity for sky or no forward surface',
         },
         depth,
@@ -964,7 +971,7 @@ function createProgram(gl: WebGL2RenderingContext, fragment: string, vertexSourc
 
 // The shadow pass uses the same finite-ray setup and cumulative fit as the
 // composite. Dead-code elimination drops unused transmission, Rayleigh, phase
-// and lunar output. It uses the ground-only resolved inverse LUT of every
+// and lunar output. It uses the resolved surface endpoints of every
 // MIE_SHADOW_STEP-th logical pixel and
 // stores the removed fraction of the solar Mie and its path length (RGBA32F;
 // w < 0: nothing occluded). The composite upsamples it bilaterally.
@@ -1172,7 +1179,7 @@ vec4 shadeSurfaceSample(vec2 screen,vec4 hit,vec3 direction,vec2 dx,vec2 dy) {
     height = fallback ? 0.0 : (radius - 6371.0) * 1000.0;
   }
   // The inverse LUT owns coverage. Native colour cannot turn a sky sample into
-  // ground, and missing native colour cannot turn a ground sample into sky.
+  // a surface hit, and missing native colour cannot turn a surface hit into sky.
   vec3 mapLinear = vec3(0.0);
   vec4 mapColor = vec4(0.0);
   if (hasSurface && !fallback) mapColor = logicalMapColor(ivec2(screen), mapLinear);
@@ -1429,7 +1436,12 @@ class NativeSurface {
 
   constructor(private readonly shadow = false) {}
 
-  #createProgram(gl: WebGL2RenderingContext, options: CustomRenderMethodInput, terrain: boolean): TileSurfaceProgram {
+  #createProgram(
+    gl: WebGL2RenderingContext,
+    options: CustomRenderMethodInput,
+    terrain: boolean,
+    depth3D: boolean,
+  ): TileSurfaceProgram {
     const position = 'a_tile.xy';
     const globe = /\bGLOBE\b/.test(options.shaderData.define);
     const vertexSource =
@@ -1458,7 +1470,7 @@ class NativeSurface {
       void main() {
         float elevation=terrainElevation(${position});
         float skirt=a_tile.z==1.0 ? u_skirt : 0.0;
-        gl_Position=${terrain ? `projectTileFor3D(${position},elevation-skirt)` : `projectTile(${position},${position})`};
+        gl_Position=${terrain || depth3D ? `projectTileFor3D(${position},elevation-skirt)` : `projectTile(${position},${position})`};
         v_nightlayer_elevation = elevation-skirt;
         #ifdef GLOBE
           v_nightlayer_direction = projectToSphere(${position}, ${position});
@@ -1546,7 +1558,7 @@ class NativeSurface {
     gl: WebGL2RenderingContext,
     tiles: Tile[],
     options: CustomRenderMethodInput,
-    shadow?: TerrainShadow,
+    { shadow, depth3D = false }: { shadow?: TerrainShadow; depth3D?: boolean } = {},
   ): void {
     const terrain = map.terrain;
     const painter = map.painter;
@@ -1560,10 +1572,14 @@ class NativeSurface {
     }
     if (this.#terrain && this.#terrain !== terrain) this.dispose(gl);
     this.#terrain = terrain;
-    const key = `${options.shaderData.variantName}/${!!terrain}`;
+    const globeMesh = /\bGLOBE\b/.test(options.shaderData.define);
+    // The 2D globe projection substitutes a clipping Z. Use the same physical
+    // 3D depth for terrainless tiles and buildings when comparing their depths.
+    const globeDepth = !terrain && depth3D && globeMesh;
+    const key = `${options.shaderData.variantName}/${!!terrain}/${globeDepth}`;
     let program = this.#programs.get(key);
     if (!program) {
-      program = this.#createProgram(gl, options, !!terrain);
+      program = this.#createProgram(gl, options, !!terrain, globeDepth);
       this.#programs.set(key, program);
     }
     const context = painter.context;
@@ -1590,7 +1606,6 @@ class NativeSurface {
       gl.frontFace(gl.CCW);
     }
     const camera = atmosphereCamera(map, options);
-    const globeMesh = /\bGLOBE\b/.test(options.shaderData.define);
     if (!shadow) {
       const radius = Math.hypot(...camera.origin);
       const horizon = groundHorizonChordSquared(
@@ -1623,7 +1638,6 @@ class NativeSurface {
       bindRelativePosition(gl, program.program, tileProjection.tileMercatorCoords, camera.origin);
       program.draw(gl, mesh);
     }
-    shadow?.finish(gl);
     context.setDirty();
   }
 

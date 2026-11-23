@@ -159,12 +159,6 @@ float shadowReceiverResidual(vec3 ray,float distance){
 export const TERRAIN_SHADOW_SIZE = 1024;
 const SIZE = TERRAIN_SHADOW_SIZE;
 
-export type TerrainShadowTile = {
-  canonical: { x: number; y: number; z: number };
-  minElevation: number;
-  maxElevation: number;
-};
-
 /** The physical solar basis is independent of screen fitting. */
 function solarAxes(sun: number[]): number[][] {
   const cross = (a: number[], b: number[]) => [
@@ -308,12 +302,7 @@ void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));gl_Posit
     );
   }
 
-  begin(
-    gl: WebGL2RenderingContext,
-    camera: ProjectionCamera,
-    sun: number[],
-    tiles: readonly TerrainShadowTile[],
-  ): void {
+  begin(gl: WebGL2RenderingContext, camera: ProjectionCamera, sun: number[], maxCasterElevation: number): void {
     const observer = camera.origin;
     const axes = solarAxes(sun);
     // The core radius follows observer altitude, not receiver
@@ -322,8 +311,8 @@ void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));gl_Posit
     // A segment outside the opaque sphere is at most the sum of the observer's
     // and terrain's tangent lengths. Its transverse radius cannot be larger.
     const height = Math.max(0, Math.hypot(...observer) - 6371);
-    const terrainHeight = Math.max(0, ...tiles.map((tile) => tile.maxElevation)) * 0.001;
-    const reach = Math.sqrt(height * (12742 + height)) + Math.sqrt(terrainHeight * (12742 + terrainHeight));
+    const casterHeight = Math.max(0, maxCasterElevation) * 0.001;
+    const reach = Math.sqrt(height * (12742 + height)) + Math.sqrt(casterHeight * (12742 + casterHeight));
     this.radius = (this.scale * Math.asinh(Math.max(reach, this.scale) / this.scale)) / (1 - 2 / SIZE);
     this.#beamBounds.set(shadowBeamBox(camera, axes, reach, this.scale, this.radius, SIZE));
     this.#alphaRange.set(shadowAlphaRange(camera, axes, SIZE));
@@ -332,7 +321,7 @@ void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));gl_Posit
     const observerHeight = observerRadius - 6371;
     // No caster may rise above the reference sphere: a caster crossing its
     // solar silhouette meets the square-root edge of the reference depth.
-    this.#referenceHeight = Math.min(Math.max(observerHeight, terrainHeight), 100);
+    this.#referenceHeight = Math.min(Math.max(observerHeight, casterHeight), 100);
     this.#referenceClipped = observerHeight > 100;
     const referenceRadius = 6371 + this.#referenceHeight;
     const transverse = Math.hypot(earthObserver[0], earthObserver[1]);

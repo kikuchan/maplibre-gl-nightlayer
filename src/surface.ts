@@ -17,6 +17,7 @@ export type DepthSample = {
   distanceMeters: number;
   /** Optical-axis depth; infinity for sky or endpoints behind the camera. */
   depthMeters: number;
+  /** Coverage of the nearest surface, including opaque buildings. */
   groundCoverage: number;
 };
 
@@ -328,7 +329,7 @@ type NativeMesh = ReturnType<NativeTerrain['getTerrainMesh']>;
 type Projection = ReturnType<CustomRenderMethodInput['getProjectionData']>;
 type TerrainData = ReturnType<NativeTerrain['getTerrainData']>;
 
-function bindTileProjection(gl: WebGL2RenderingContext, p: WebGLProgram, projection: Projection): void {
+export function bindTileProjection(gl: WebGL2RenderingContext, p: WebGLProgram, projection: Projection): void {
   for (const [name, value] of [
     ['u_projection_matrix', projection.mainMatrix],
     ['u_projection_fallback_matrix', projection.fallbackMatrix],
@@ -339,7 +340,7 @@ function bindTileProjection(gl: WebGL2RenderingContext, p: WebGLProgram, project
   gl.uniform1f(uniformLocation(gl, p, 'u_projection_transition'), projection.projectionTransition);
 }
 
-const terrainElevationGLSL = `
+export const terrainElevationGLSL = `
 uniform sampler2D u_dem;
 uniform mat4 u_dem_matrix;
 uniform vec4 u_dem_unpack;
@@ -366,6 +367,16 @@ float terrainElevation(vec2 tile) {
 }
 `;
 
+export function bindTerrainElevation(gl: WebGL2RenderingContext, p: WebGLProgram, terrain: TerrainData): void {
+  gl.activeTexture(gl.TEXTURE3);
+  gl.bindTexture(gl.TEXTURE_2D, terrain.texture);
+  gl.uniform1i(uniformLocation(gl, p, 'u_dem'), 3);
+  gl.uniformMatrix4fv(uniformLocation(gl, p, 'u_dem_matrix'), false, terrain.u_terrain_matrix);
+  gl.uniform4fv(uniformLocation(gl, p, 'u_dem_unpack'), terrain.u_terrain_unpack);
+  gl.uniform1f(uniformLocation(gl, p, 'u_dem_size'), terrain.u_terrain_dim);
+  gl.uniform1f(uniformLocation(gl, p, 'u_dem_exaggeration'), terrain.u_terrain_exaggeration);
+}
+
 export class TileSurfaceProgram {
   readonly program: WebGLProgram;
   #vao: WebGLVertexArrayObject;
@@ -380,15 +391,7 @@ export class TileSurfaceProgram {
     gl.bindVertexArray(this.#vao);
     bindTileProjection(gl, p, projection);
     gl.uniform1f(uniformLocation(gl, p, 'u_skirt'), skirt);
-    if (terrain) {
-      gl.activeTexture(gl.TEXTURE3);
-      gl.bindTexture(gl.TEXTURE_2D, terrain.texture);
-      gl.uniform1i(uniformLocation(gl, p, 'u_dem'), 3);
-      gl.uniformMatrix4fv(uniformLocation(gl, p, 'u_dem_matrix'), false, terrain.u_terrain_matrix);
-      gl.uniform4fv(uniformLocation(gl, p, 'u_dem_unpack'), terrain.u_terrain_unpack);
-      gl.uniform1f(uniformLocation(gl, p, 'u_dem_size'), terrain.u_terrain_dim);
-      gl.uniform1f(uniformLocation(gl, p, 'u_dem_exaggeration'), terrain.u_terrain_exaggeration);
-    }
+    if (terrain) bindTerrainElevation(gl, p, terrain);
   }
   #bindVertex(gl: WebGL2RenderingContext, mesh: NativeMesh, offset: number): void {
     const vertex = mesh.vertexBuffer;
@@ -421,17 +424,25 @@ export class TileSurfaceProgram {
   }
 }
 
-export function tileVertexPrelude(options: CustomRenderMethodInput, terrain: boolean): string {
+export function projectionVertexPrelude(options: CustomRenderMethodInput): string {
   return `#version 300 es
 precision highp float;
 precision highp int;
 ${options.shaderData.define}
-${terrain ? '#define HAS_DEM' : ''}
 ${options.shaderData.vertexShaderPrelude}
+`;
+}
+
+export function tileVertexPrelude(options: CustomRenderMethodInput, terrain: boolean): string {
+  return (
+    projectionVertexPrelude(options) +
+    `
+${terrain ? '#define HAS_DEM' : ''}
 ${terrainElevationGLSL}
 layout(location=0) in vec3 a_tile;
 uniform float u_skirt;
-`;
+`
+  );
 }
 
 const RADIUS = 6371;

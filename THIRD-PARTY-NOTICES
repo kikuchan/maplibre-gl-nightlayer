@@ -1,3 +1,48 @@
+The analytic AgX base-look and fitted ACES preview transforms are adapted from three.js:
+https://github.com/mrdoob/three.js/blob/dev/src/renderers/shaders/ShaderChunk/tonemapping_pars_fragment.glsl.js
+Its implementation follows Filament's Blender-derived Rec.2020 AgX transform
+and the minimal AgX default-contrast polynomial approximation.
+Adaptations: shared preview exposure/sRGB encoding, explicit zero-input guard,
+no optional look, and no three.js dependency. This is an analytic approximation,
+not Blender's complete OpenColorIO configuration.
+The ACES transform uses Stephen Hill's fitted RRT/ODT and input/output matrices,
+including three.js's 1/0.6 viewing-environment scale. Its rational fit is evaluated
+in a scaled form to avoid HDR overflow. It is not the full ACES reference pipeline.
+Original fitted transform: https://github.com/selfshadow/ltc_code/blob/master/webgl/shaders/ltc/ltc_blit.fs
+
+The MIT License
+
+Copyright © 2010-2026 three.js authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+The analytic Filmic preview is an independently implemented approximation to
+Troy Sobotka's Filmic Blender OpenColorIO configuration and Base Contrast look:
+https://github.com/sobotka/filmic-blender
+Reference revision: 84bf836a4d9e130045c962c47ac4206395d4393b
+The reference config, desat65cube.spi3d and Filmic_to_0-70_1-03.spi1d were used
+for numerical comparisons. They are not included in the package. The intensity
+compression is evaluated analytically, and an eighth-degree polynomial fitted
+to Base Contrast replaces the 1D look. This is not the complete OCIO pipeline.
+The default final log range is -12.473931188 to 4.026068812 (16.5 stops).
+It uses the shared sRGB output encoder, not a second display encoding.
+
 The atmospheric lighting LUT is generated using Eric Bruneton's
 Precomputed Atmospheric Scattering implementation:
 https://github.com/ebruneton/precomputed_atmospheric_scattering
@@ -52,7 +97,8 @@ Revision: c7f7f883fe678cc7680169a50ccd7dcc49b060ce
 Data: hyg/CURRENT/hygdata_v41.csv
 
 Adaptations: select V <= 6.5; convert J2000 positions/proper motions and
-V magnitudes/B-V colours to GPU point records; compress the
+V magnitudes/B-V colours to GPU point records, including blackbody-based
+estimated angular diameters (not measured sizes); compress the
 result as star-catalog.bin.gz. This adapted dataset retains CC BY-SA 4.0.
 The library code is a separate work and retains the project's MIT license.
 

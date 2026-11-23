@@ -24,7 +24,6 @@
   "module": "dist/main.js",
   "types": "dist/main.d.ts",
   "scripts": {
-    "generate:lut": "uv run scripts/generate-lighting-lut.py",
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint ./src tsdown.config.ts",
@@ -32,14 +31,14 @@
     "format:fix": "oxfmt --write ./src tsdown.config.ts"
   },
   "devDependencies": {
-    "maplibre-gl": "^6.14.0",
-    "oxfmt": "^0.73.0",
-    "oxlint": "^1.88.0",
-    "tsdown": "^0.23.1",
+    "maplibre-gl": "^6.18.0",
+    "oxfmt": "^0.79.0",
+    "oxlint": "^1.94.0",
+    "tsdown": "^0.23.7",
     "typescript": "^7.0.2"
   },
   "peerDependencies": {
-    "maplibre-gl": "^6.14.0"
+    "maplibre-gl": "^6.18.0"
   },
-  "packageManager": "pnpm@12.11.2"
+  "packageManager": "pnpm@12.21.0"
 }

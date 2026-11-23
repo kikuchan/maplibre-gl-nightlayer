@@ -1,43 +1,79 @@
 import type { CustomLayerInterface, CustomRenderMethodInput, Map as MaplibreMap } from 'maplibre-gl';
-import { MercatorCoordinate } from 'maplibre-gl';
-import { uploadLUT, type LUTMetadata } from './lut.js';
-import { AutoExposure, EXPOSURE_METER_MIN_LOG, EXPOSURE_METER_LOG_RANGE, MAX_EXPOSURE } from './exposure.js';
-import { celestialRotation, uploadStarfield, type Starfield } from './stars.js';
-import { lunarLight } from './moon.js';
-import { compileProgram } from './gl-program.js';
+import {
+  projectionCamera as atmosphereCamera,
+  supportsProjection,
+  earthIntersectionGLSL,
+  inverseLookupGLSL,
+  mercatorSphereGLSL,
+  inverseSkyGLSL,
+  ForwardSurface,
+  groundHorizonChordSquared,
+  bindRelativePosition,
+  relativePositionGLSL,
+  TileSurfaceProgram,
+  tileVertexPrelude,
+  depthSample,
+  viewAxis,
+  opticalDepthMeters,
+  twilightSettings,
+  twilightGLSL,
+  type WorldCoordinates,
+  type DepthSample,
+  type Twilight,
+  type TwilightInput,
+} from './surface.js';
+import { getIrradianceAxis, loadTransportLUT, uploadIrradiance, type IrradianceAxis, type LUTMetadata } from './lut.js';
+import {
+  DirectionTransport,
+  hermiteOpticalGLSL,
+  hermiteScatteringGLSL,
+  MIE_SHADOW_STEP,
+  atmosphereFade,
+  atmosphereSettings,
+  type Atmosphere,
+  type AtmosphereInput,
+} from './atmosphere.js';
+import { celestialRotation, uploadStarfield, lunarLight, type Starfield } from './celestial.js';
+import { compileProgram, uniformLocation, SurfaceTargets } from './gl.js';
+import {
+  focalLength,
+  receiverGain,
+  SENSOR_PITCH_MM,
+  encodeEXR,
+  Receiver,
+  AutoExposure,
+  developmentSettings,
+  MAP_DEVELOPMENT,
+  type Development,
+  type DevelopmentInput,
+} from './receiver.js';
+import { shadowFragment, shadowVertexGLSL, TerrainShadow, TERRAIN_SHADOW_SIZE, ShadowIntervals } from './shadow.js';
 
-type Color3 = [number, number, number];
-type Color4 = [number, number, number, number];
-type Color = Color3 | Color4;
+export type { DepthSample, Color, Color3, Color4, Twilight, TwilightInput, TwilightSteps } from './surface.js';
+export type { Development, DevelopmentInput, DevelopmentProcess } from './receiver.js';
+export type { Atmosphere, AtmosphereInput } from './atmosphere.js';
+
 type Options = {
   date?: Date | null;
   /** Whole-layer opacity, including atmospheric effects. Default: 0.5. */
   opacity?: number;
-  /** Night illumination override; alpha controls replacement strength. Default: transparent. */
-  color?: Color;
-  /** Day illumination override; alpha controls replacement strength. Default: transparent. */
-  daytimeColor?: Color;
-  twilightSteps?: number;
-  /** Gamma of intermediate twilight opacity. Default: 1. Ignored for continuous illumination. */
-  twilightAttenuation?: number;
+  /** Map-only stepped surface lighting; null/omission keeps continuous lighting.
+   * Defaults: black with alpha 0.95, attenuation 0.5. Ignored by camera/physical export. */
+  twilight?: TwilightInput;
   updateInterval?: number;
   /**
-   * Blend from vacuum to atmospheric lighting and transport, from 0 to 1. The Sun remains visible. Default: 0.
+   * Sky scattering, finite-path fog, and celestial backgrounds/disks. Default: false.
    */
-  atmosphere?: number;
-  /** Exposure adjustment in stops, from -12 to 24. Default: 0. */
-  exposure?: number;
-  /** Automatically meter scene brightness; exposure becomes a compensation. Default: false. */
-  autoExposure?: boolean;
-  /** Show the embedded, date-aligned stars and Milky Way. Default: true. */
-  stars?: boolean;
-  /** Custom LUT ZIP URL. Uses the embedded LUT when omitted. */
-  lut?: string | URL;
+  atmosphere?: AtmosphereInput;
+  /** False: fixed linear map presentation. A process string abbreviates an object. */
+  development?: DevelopmentInput;
+  /** Atmosphere LUT archive URL. Defaults to atmosphere-lut.zip next to the module. */
+  lut?: string;
 };
 type Target = { texture: WebGLTexture; framebuffer: WebGLFramebuffer };
 const radians = (degrees: number) => (degrees * Math.PI) / 180;
 const degrees = (radians: number) => (radians * 180) / Math.PI;
-const THRESHOLDS = Array.from({ length: 15 }, (_, i) => Math.sin(radians(i === 0 ? -0.8333333 : -6 * i)));
+const THRESHOLDS = Array.from({ length: 4 }, (_, i) => Math.sin(radians(i === 0 ? -0.8333333 : -6 * i)));
 
 /** Subsolar longitude/latitude; omitted or null date means now. */
 export function getSubsolarPoint(date?: Date | null): { lng: number; lat: number } {
@@ -60,160 +96,73 @@ export function getSubsolarPoint(date?: Date | null): { lng: number; lat: number
   return { lng: -15 * (UTC - 12 + EOT / 60), lat: degrees(Math.asin(Math.sin(-e) * Math.cos(B))) };
 }
 
-function premultiply(color: Color4): number[] {
-  const [r, g, b, a] = color.map((value) => value / 255);
-  return [r ** 2.2 * a, g ** 2.2 * a, b ** 2.2 * a, a];
-}
-
-function atmosphereCamera(map: MaplibreMap, options: CustomRenderMethodInput) {
-  const projection = options.defaultProjectionData;
-  const p = options.projectionMatrix;
-  const kilometres = 1 / (MercatorCoordinate.fromLngLat(map.getCenter()).meterInMercatorCoordinateUnits() * 1000);
-  const inverse = [
-    1 / p[0],
-    0,
-    0,
-    0,
-    0,
-    1 / p[5],
-    0,
-    0,
-    0,
-    0,
-    0,
-    1 / p[14],
-    p[8] / p[0],
-    p[9] / p[5],
-    -1,
-    p[10] / p[14],
-  ];
-  const transition = Math.max(0, Math.min(1, projection.projectionTransition));
-  const camera = (matrix: ArrayLike<number>, mercator: boolean) => {
-    const view = Array.from({ length: 16 }, (_, i) =>
-      [0, 1, 2, 3].reduce((sum, k) => sum + inverse[k * 4 + (i % 4)] * matrix[Math.floor(i / 4) * 4 + k], 0),
-    );
-    // Invert the native affine view, preserving its depth-to-distance scale.
-    const cross = (a: number[], b: number[]) => [
-      a[1] * b[2] - a[2] * b[1],
-      a[2] * b[0] - a[0] * b[2],
-      a[0] * b[1] - a[1] * b[0],
-    ];
-    const a = view.slice(0, 3),
-      b = view.slice(4, 7),
-      c = view.slice(8, 11);
-    const rows = [cross(b, c), cross(c, a), cross(a, b)];
-    const determinant = a.reduce((sum, n, i) => sum + n * rows[0][i], 0);
-    if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-30)
-      throw new Error('Invalid atmosphere camera transform');
-    const position = rows.map((row) => -row.reduce((sum, n, i) => sum + n * view[12 + i], 0) / determinant);
-    const inverseView = Array.from({ length: 9 }, (_, i) => rows[i % 3][Math.floor(i / 3)] / determinant);
-    if (mercator) {
-      const latitude = Math.atan(Math.sinh(Math.PI * (1 - 2 * position[1]))),
-        longitude = (position[0] - 0.5) * 2 * Math.PI;
-      const up = [
-        Math.sin(longitude) * Math.cos(latitude),
-        Math.sin(latitude),
-        Math.cos(longitude) * Math.cos(latitude),
-      ];
-      const origin = up.map((n) => n * (6371 + position[2] * kilometres));
-      return {
-        origin,
-        position,
-        inverseView,
-      };
-    }
-    return { origin: position.map((n) => n * 6371), inverseView };
-  };
-  const mercator = transition < 1 ? camera(projection.fallbackMatrix, true) : undefined;
-  const globe = transition > 0 ? camera(projection.mainMatrix, false) : undefined;
-  // Keep the physical observer continuous, including Mercator terrain elevation.
-  const origin =
-    mercator && globe
-      ? mercator.origin.map((n, i) => n + (globe.origin[i] - n) * transition)
-      : (mercator ?? globe)!.origin;
-  let mercatorView = Array(9).fill(0);
-  if (mercator) {
-    const radius = Math.hypot(...mercator.origin);
-    const up = mercator.origin.map((n) => n / radius);
-    const longitude = Math.atan2(up[0], up[2]);
-    const east = [Math.cos(longitude), 0, -Math.sin(longitude)];
-    const north = [up[1] * east[2], up[2] * east[0] - up[0] * east[2], -up[1] * east[0]];
-    // Mercator Y points south. Convert the inverse view at the observer, not at
-    // each tile endpoint, so sky and terrain share one physical viewing frame.
-    const horizontal = 2 * Math.PI * 6371 * Math.hypot(up[0], up[2]);
-    mercatorView = Array.from({ length: 9 }, (_, i) => {
-      const column = Math.floor(i / 3) * 3,
-        row = i % 3;
-      return (
-        (east[row] * mercator.inverseView[column] - north[row] * mercator.inverseView[column + 1]) * horizontal +
-        up[row] * mercator.inverseView[column + 2] * kilometres
-      );
-    });
-  }
-  return {
-    origin,
-    inverseProjection: inverse,
-    mercatorView,
-    globeView: globe?.inverseView.map((n) => n * 6371) ?? Array(9).fill(0),
-    mercatorPosition: mercator?.position ?? [0, 0, 0],
-    mercatorKilometres: kilometres,
-  };
-}
-
 export class NightLayer implements CustomLayerInterface {
   id = 'nightlayer';
   type = 'custom' as const;
   renderingMode = '2d' as const;
   #date: Date | null = null;
   #opacity: number;
-  #color: Color4 = [0, 0, 0, 0];
-  #daytimeColor: Color4 = [0, 0, 0, 0];
-  #twilightSteps: number;
-  #twilightAttenuation = 1;
+  #twilight: Twilight | null = null;
   #updateInterval: number;
-  #atmosphere = 0;
-  #exposure = 0;
-  #autoExposure = false;
-  #stars = true;
+  #atmosphere: Atmosphere = atmosphereSettings(false);
+  #shadowSignature?: string;
+  #shadowDEMs: object[] = [];
+  #terrainShadow?: TerrainShadow;
+  #shadowIntervals?: ShadowIntervals;
+  #shadowIntervalsReady = false;
+  #shadowRenderer?: NativeSurface;
+  #development: Development | false = false;
+  #capture?: { resolve: (blob: Blob) => void; reject: (error: Error) => void; exposure: 'preview' | 'raw' };
+  #receiver?: Receiver;
+  #logicalWidth = 0;
+  #logicalHeight = 0;
   #starfield?: Starfield;
   #exposureMeter?: AutoExposure;
   #exposureTimer?: ReturnType<typeof setTimeout>;
-  #lut?: string | URL;
-  #lutTextures?: [WebGLTexture, WebGLTexture, WebGLTexture, WebGLTexture];
+  #directionTransport?: DirectionTransport;
+  #irradianceTexture?: WebGLTexture;
   #lutMetadata?: LUTMetadata;
-  #lutTiles?: [number, number, number];
+  #irradianceAxis?: IrradianceAxis;
+  #lutSource?: string;
+  #lutRequest?: { source?: string; promise: Promise<void> };
   #mapColor?: Target & { width: number; height: number };
   #timer?: ReturnType<typeof setInterval>;
   #map?: MaplibreMap;
   #attachment?: object;
   #lightingProgram?: WebGLProgram;
+  #mieOcclusionProgram?: WebGLProgram;
+  #mieOcclusion?: Target & { width: number; height: number };
   #vertexArray?: WebGLVertexArrayObject;
   #surfaceRenderer?: NativeSurface;
-  #skyRenderer?: AtmosphereSurface;
-  #groundRenderer?: SeaLevelSurface;
-  #surface?: Target & { normals: WebGLTexture; depth: WebGLRenderbuffer; width: number; height: number };
+  #forwardSurface?: ForwardSurface;
+  #surface?: SurfaceTargets;
+  #viewAxis: number[] = [0, 0, -1];
   #surfaceReady = false;
+  #surfaceTiles: Tile[] = [];
   #surfaceSignature?: string;
+  #surfaceCoordinates?: WorldCoordinates;
   #invalidateSurface = () => {
     this.#surfaceSignature = undefined;
+    // Includes DEM border backfills, which can mutate a loaded DEM in place.
+    this.#shadowSignature = undefined;
+  };
+  #contextLost = () => {
+    this.#capture?.reject(new Error('WebGL context lost before EXR capture'));
+    this.#capture = undefined;
   };
 
   constructor(opts: Options = {}) {
     this.#opacity = opts.opacity ?? 0.5;
-    this.#twilightSteps = opts.twilightSteps ?? 0;
     this.#updateInterval = opts.updateInterval ?? 10000;
-    this.#lut = opts.lut;
-    this.setAtmosphere(opts.atmosphere ?? 0);
-    this.setExposure(opts.exposure ?? 0);
-    this.setAutoExposure(opts.autoExposure ?? false);
-    this.setStars(opts.stars ?? true);
-    this.setTwilightAttenuation(opts.twilightAttenuation ?? 1);
-    this.setColor(opts.color ?? [0, 0, 0, 0]);
-    this.setDaytimeColor(opts.daytimeColor ?? [0, 0, 0, 0]);
+    this.#lutSource = opts.lut;
+    this.setAtmosphere(opts.atmosphere ?? false);
+    this.setDevelopment(opts.development ?? false);
+    this.setTwilight(opts.twilight);
     this.setDate(opts.date ?? null);
   }
 
   #repaint(): void {
+    if (this.#map && !supportsProjection(this.#map)) return;
     this.#exposureMeter?.invalidate();
     this.#map?.triggerRepaint();
   }
@@ -245,33 +194,11 @@ export class NightLayer implements CustomLayerInterface {
     this.#opacity = opacity;
     this.#repaint();
   }
-  getColor(): Color4 {
-    return this.#color;
+  getTwilight(): Twilight | null {
+    return this.#twilight ? { ...this.#twilight, color: [...this.#twilight.color] } : null;
   }
-  setColor(color: Color): void {
-    this.#color = [...(color.slice(0, 3) as Color3), color[3] ?? 255];
-    this.#repaint();
-  }
-  getDaytimeColor(): Color4 {
-    return this.#daytimeColor;
-  }
-  setDaytimeColor(color: Color): void {
-    this.#daytimeColor = [...(color.slice(0, 3) as Color3), color[3] ?? 255];
-    this.#repaint();
-  }
-  getTwilightSteps(): number {
-    return this.#twilightSteps;
-  }
-  setTwilightSteps(steps: number): void {
-    this.#twilightSteps = steps;
-    this.#repaint();
-  }
-  getTwilightAttenuation(): number {
-    return this.#twilightAttenuation;
-  }
-  setTwilightAttenuation(gamma: number): void {
-    if (!Number.isFinite(gamma) || gamma <= 0) throw new RangeError('Twilight attenuation must be finite and positive');
-    this.#twilightAttenuation = gamma;
+  setTwilight(twilight?: TwilightInput): void {
+    this.#twilight = twilightSettings(twilight);
     this.#repaint();
   }
   getUpdateInterval(): number {
@@ -281,58 +208,124 @@ export class NightLayer implements CustomLayerInterface {
     this.#updateInterval = interval;
     this.#setIntervalTimer();
   }
-  getAtmosphere(): number {
-    return this.#atmosphere;
+  getAtmosphere(): Atmosphere {
+    return { ...this.#atmosphere };
   }
-  setAtmosphere(atmosphere: number): void {
-    if (!Number.isFinite(atmosphere) || atmosphere < 0 || atmosphere > 1)
-      throw new RangeError('Atmosphere must be between 0 and 1');
-    this.#atmosphere = atmosphere;
+  setAtmosphere(atmosphere: AtmosphereInput): void {
+    this.#atmosphere = atmosphereSettings(atmosphere);
     this.#repaint();
   }
-
-  getExposure(): number {
-    return this.#exposure;
+  getDevelopment(): Development | false {
+    return this.#development && { ...this.#development };
   }
-  setExposure(exposure: number): void {
-    if (!Number.isFinite(exposure) || exposure < -12 || exposure > MAX_EXPOSURE)
-      throw new RangeError(`Exposure must be between -12 and ${MAX_EXPOSURE} stops`);
-    this.#exposure = exposure;
-    this.#repaint();
-  }
-
-  getAutoExposure(): boolean {
-    return this.#autoExposure;
-  }
-
-  setAutoExposure(enabled: boolean): void {
-    this.#autoExposure = enabled;
-    if (this.#exposureTimer !== undefined) clearTimeout(this.#exposureTimer);
-    this.#exposureTimer = undefined;
-    if (!enabled && this.#map) {
-      this.#exposureMeter?.dispose(this.#map.painter.context.gl);
+  setDevelopment(input: DevelopmentInput): void {
+    const previous = this.#development;
+    const next = developmentSettings(input, previous);
+    const exposure = next ? next.exposure : 0;
+    if (exposure !== (previous ? previous.exposure : 0)) this.#exposureMeter?.setExposure(exposure);
+    this.#development = next;
+    if (!next || !next.autoExposure) {
+      if (this.#exposureTimer !== undefined) clearTimeout(this.#exposureTimer);
+      this.#exposureTimer = undefined;
+      if (this.#exposureMeter && this.#map) this.#exposureMeter.dispose(this.#map.painter.context.gl);
       this.#exposureMeter = undefined;
     }
-    this.#repaint();
+    if (!!previous !== !!next) this.#repaint();
+    else this.#map?.triggerRepaint();
   }
 
-  getStars(): boolean {
-    return this.#stars;
+  /** Last rendered logical pixel at canvas-relative CSS coordinates (top-left).
+   * Returns ground depth and coverage for each pixel.
+   * Returns null before a valid frame, outside the canvas, or for unsupported CRS. */
+  getDepthAt(x: number, y: number): DepthSample | null {
+    if (!this.#map || !supportsProjection(this.#map) || !this.#surfaceReady || !this.#surface) return null;
+    const canvas = this.#map.getCanvas();
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      x < 0 ||
+      y < 0 ||
+      x >= canvas.clientWidth ||
+      y >= canvas.clientHeight
+    )
+      return null;
+    const pixelX = Math.floor((x * this.#surface.width) / canvas.clientWidth);
+    const pixelY = this.#surface.height - 1 - Math.floor((y * this.#surface.height) / canvas.clientHeight);
+    return depthSample(this.#surface.readRays(pixelX, pixelY, 1, 1), this.#viewAxis);
   }
-  setStars(enabled: boolean): void {
-    this.#stars = enabled;
-    this.#repaint();
+
+  /** Capture linear FLOAT RGB + Z (axial metres) OpenEXR, without preview tone mapping.
+   * Pass { exposure: 'raw' } to preserve the unexposed receiver values. */
+  captureEXR(options: { exposure?: 'preview' | 'raw' } = {}): Promise<Blob> {
+    if (this.#map && !supportsProjection(this.#map))
+      return Promise.reject(new Error('NightLayer: EXR capture is unavailable for CRS projections'));
+    if (!this.#map || !this.#lightingProgram || !this.#starfield || !this.#directionTransport)
+      return Promise.reject(new Error('NightLayer is not ready for capture'));
+    if (this.#capture) return Promise.reject(new Error('An EXR capture is already pending'));
+    return new Promise((resolve, reject) => {
+      this.#capture = { resolve, reject, exposure: options.exposure ?? 'preview' };
+      this.#map!.triggerRepaint();
+    });
+  }
+
+  /** Replace the LUT after loading succeeds; omit the URL to restore the default atmosphere archive. */
+  setLUT(source?: string): Promise<void> {
+    const map = this.#map,
+      attachment = this.#attachment;
+    if (!map || !attachment) {
+      this.#lutSource = source;
+      return Promise.resolve();
+    }
+    if (this.#lutRequest && this.#lutRequest.source === source) return this.#lutRequest.promise;
+    if (this.#directionTransport && this.#lutSource === source) {
+      this.#lutRequest = undefined;
+      return Promise.resolve();
+    }
+    const gl = map.painter.context.gl;
+    const request = { source, promise: Promise.resolve() };
+    this.#lutRequest = request;
+    request.promise = loadTransportLUT(source)
+      .then((lut) => {
+        if (this.#attachment !== attachment || this.#lutRequest !== request) return;
+        const transport = new DirectionTransport(gl, lut);
+        let irradiance: WebGLTexture;
+        try {
+          irradiance = uploadIrradiance(gl, lut);
+        } catch (error) {
+          transport.dispose();
+          throw error;
+        }
+        this.#directionTransport?.dispose();
+        if (this.#irradianceTexture) gl.deleteTexture(this.#irradianceTexture);
+        this.#directionTransport = transport;
+        this.#irradianceTexture = irradiance;
+        this.#lutMetadata = lut.metadata;
+        this.#irradianceAxis = getIrradianceAxis(lut);
+        this.#lutSource = source;
+        this.#repaint();
+      })
+      .finally(() => {
+        if (this.#lutRequest === request) this.#lutRequest = undefined;
+        map.painter.context.setDirty();
+      });
+    return request.promise;
   }
 
   onAdd(map: MaplibreMap, context: WebGLRenderingContext | WebGL2RenderingContext): void {
     const gl = context as WebGL2RenderingContext;
-    if (!gl.getExtension('OES_texture_float_linear')) throw new Error('NightLayer requires OES_texture_float_linear');
+    if (typeof gl.texImage3D !== 'function') throw new Error('NightLayer requires WebGL 2');
+    const missing = ['OES_texture_float_linear', 'EXT_color_buffer_float', 'EXT_float_blend'].filter(
+      (name) => !gl.getExtension(name),
+    );
+    if (missing.length) throw new Error(`NightLayer: missing required WebGL extensions: ${missing.join(', ')}`);
+    if (typeof Float16Array === 'undefined') throw new Error('NightLayer requires Float16Array support');
     this.#vertexArray = gl.createVertexArray() ?? undefined;
     if (!this.#vertexArray) throw new Error('Failed to create NightLayer vertex array');
     this.#lightingProgram = createProgram(gl, lightingFragment);
+    this.#mieOcclusionProgram = createProgram(gl, mieOcclusionFragment);
+    this.#receiver = new Receiver(gl);
     this.#surfaceRenderer = new NativeSurface();
-    this.#skyRenderer = new AtmosphereSurface(gl);
-    this.#groundRenderer = new SeaLevelSurface(gl);
+    this.#forwardSurface = new ForwardSurface(gl);
     this.#map = map;
     const attachment = (this.#attachment = {});
     uploadStarfield(gl)
@@ -349,24 +342,12 @@ export class NightLayer implements CustomLayerInterface {
         if (this.#attachment === attachment) map.fire('error', { error });
       })
       .finally(() => map.painter.context.setDirty());
-    uploadLUT(gl, this.#lut)
-      .then(({ metadata, tiles, textures }) => {
-        if (this.#attachment !== attachment) {
-          for (const texture of textures) gl.deleteTexture(texture);
-          return;
-        }
-        this.#lutTextures = textures;
-        this.#lutMetadata = metadata;
-        this.#lutTiles = tiles;
-        map.painter.context.setDirty();
-        this.#repaint();
-      })
-      .catch((error) => {
-        if (this.#attachment === attachment) map.fire('error', { error });
-      })
-      .finally(() => map.painter.context.setDirty());
+    void this.setLUT(this.#lutSource).catch((error) => {
+      if (this.#attachment === attachment) map.fire('error', { error });
+    });
     map.on('sourcedata', this.#invalidateSurface);
     map.on('terrain', this.#invalidateSurface);
+    map.on('webglcontextlost', this.#contextLost);
     this.#setIntervalTimer();
   }
   #createTexture(gl: WebGL2RenderingContext): WebGLTexture {
@@ -397,12 +378,9 @@ export class NightLayer implements CustomLayerInterface {
     }
     return { texture, framebuffer };
   }
-  #deleteSurface(gl: WebGL2RenderingContext): void {
+  #deleteSurface(_gl: WebGL2RenderingContext): void {
     if (!this.#surface) return;
-    gl.deleteTexture(this.#surface.texture);
-    gl.deleteFramebuffer(this.#surface.framebuffer);
-    gl.deleteRenderbuffer(this.#surface.depth);
-    gl.deleteTexture(this.#surface.normals);
+    this.#surface.dispose();
     this.#surface = undefined;
   }
   #deleteMapColor(gl: WebGL2RenderingContext): void {
@@ -410,6 +388,14 @@ export class NightLayer implements CustomLayerInterface {
     gl.deleteTexture(this.#mapColor.texture);
     gl.deleteFramebuffer(this.#mapColor.framebuffer);
     this.#mapColor = undefined;
+  }
+  /** Logical (CSS) pixel grid of the map canvas: the virtual sensor's pixels. */
+  #sensorSize(gl: WebGL2RenderingContext): [number, number] {
+    const canvas = this.#map!.getCanvas();
+    return [
+      Math.max(1, canvas.clientWidth || gl.drawingBufferWidth),
+      Math.max(1, canvas.clientHeight || gl.drawingBufferHeight),
+    ];
   }
   #copyMapColor(gl: WebGL2RenderingContext): void {
     const width = gl.drawingBufferWidth,
@@ -442,45 +428,81 @@ export class NightLayer implements CustomLayerInterface {
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, draw);
   }
   onRemove(map: MaplibreMap, context: WebGLRenderingContext | WebGL2RenderingContext): void {
+    this.#capture?.reject(new Error('NightLayer removed before EXR capture'));
+    this.#capture = undefined;
     const gl = context as WebGL2RenderingContext;
     if (this.#timer !== undefined) clearInterval(this.#timer);
     if (this.#exposureTimer !== undefined) clearTimeout(this.#exposureTimer);
     this.#exposureTimer = undefined;
     this.#exposureMeter?.dispose(gl);
     this.#exposureMeter = undefined;
+    this.#receiver?.dispose(gl);
+    this.#receiver = undefined;
     this.#timer = undefined;
     map.off('sourcedata', this.#invalidateSurface);
     map.off('terrain', this.#invalidateSurface);
+    map.off('webglcontextlost', this.#contextLost);
     this.#surfaceRenderer?.dispose(gl);
+    this.#shadowRenderer?.dispose(gl);
+    this.#terrainShadow?.dispose(gl);
+    this.#shadowSignature = undefined;
+    this.#shadowDEMs = [];
+    this.#shadowRenderer = undefined;
+    this.#terrainShadow = undefined;
+    this.#shadowIntervals?.dispose(gl);
+    this.#shadowIntervals = undefined;
+    this.#shadowIntervalsReady = false;
     this.#surfaceRenderer = undefined;
-    this.#skyRenderer?.dispose(gl);
-    this.#skyRenderer = undefined;
-    this.#groundRenderer?.dispose(gl);
-    this.#groundRenderer = undefined;
+    this.#forwardSurface?.dispose(gl);
+    this.#forwardSurface = undefined;
     this.#deleteSurface(gl);
     this.#deleteMapColor(gl);
-    for (const texture of this.#lutTextures ?? []) gl.deleteTexture(texture);
+    this.#directionTransport?.dispose();
+    if (this.#irradianceTexture) gl.deleteTexture(this.#irradianceTexture);
     for (const texture of this.#starfield?.textures ?? []) gl.deleteTexture(texture);
     this.#starfield?.points.dispose(gl);
     this.#starfield = undefined;
     if (this.#lightingProgram) gl.deleteProgram(this.#lightingProgram);
+    if (this.#mieOcclusionProgram) gl.deleteProgram(this.#mieOcclusionProgram);
+    if (this.#mieOcclusion) {
+      gl.deleteTexture(this.#mieOcclusion.texture);
+      gl.deleteFramebuffer(this.#mieOcclusion.framebuffer);
+    }
     if (this.#vertexArray) gl.deleteVertexArray(this.#vertexArray);
-    this.#lutTextures = undefined;
+    this.#directionTransport = undefined;
+    this.#irradianceTexture = undefined;
     this.#lutMetadata = undefined;
-    this.#lutTiles = undefined;
+    this.#irradianceAxis = undefined;
+    this.#lutRequest = undefined;
     this.#attachment = undefined;
     this.#lightingProgram = undefined;
+    this.#mieOcclusionProgram = undefined;
+    this.#mieOcclusion = undefined;
     this.#vertexArray = undefined;
     this.#surfaceReady = false;
     this.#surfaceSignature = undefined;
     this.#map = undefined;
   }
   prerender(gl: WebGL2RenderingContext, options: CustomRenderMethodInput): void {
+    if (this.#map && !supportsProjection(this.#map)) {
+      this.#surfaceReady = false;
+      this.#surfaceSignature = undefined;
+      this.#shadowSignature = undefined;
+      this.#capture?.reject(new Error('NightLayer: EXR capture is unavailable for CRS projections'));
+      this.#capture = undefined;
+      return;
+    }
     if (!this.#map || !this.#surfaceRenderer || this.#opacity <= 0) return;
     const projection = options.defaultProjectionData;
+    const coordinates = this.#map.style.projection?.worldCoordinateHelper;
+    if (!coordinates) throw new Error('NightLayer: geographic projection mapping is unavailable');
+    // Rasterize all endpoint types into one inverse LUT; ground writes the stencil.
+    const [width, height] = this.#sensorSize(gl);
     const signature = JSON.stringify([
-      gl.drawingBufferWidth,
-      gl.drawingBufferHeight,
+      width,
+      height,
+      coordinates.name,
+      options.shaderData.variantName,
       Array.from(projection.mainMatrix),
       Array.from(projection.fallbackMatrix),
       projection.projectionTransition,
@@ -491,70 +513,215 @@ export class NightLayer implements CustomLayerInterface {
       this.#map.getTerrain(),
       this.#map.getRenderWorldCopies(),
     ]);
-    if (this.#surfaceReady && signature === this.#surfaceSignature) return;
+    if (this.#surfaceReady && signature === this.#surfaceSignature && coordinates === this.#surfaceCoordinates) return;
+    if (coordinates !== this.#surfaceCoordinates) this.#shadowSignature = undefined;
     this.#exposureMeter?.invalidate();
     this.#surfaceReady = false;
-    if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('NightLayer requires EXT_color_buffer_float');
-    const width = Math.max(1, gl.drawingBufferWidth);
-    const height = Math.max(1, gl.drawingBufferHeight);
     if (!this.#surface || this.#surface.width !== width || this.#surface.height !== height) {
       this.#deleteSurface(gl);
-      const target = this.#createTarget(gl, width, height);
-      const depth = gl.createRenderbuffer();
-      if (!depth) throw new Error('Failed to create NightLayer depth buffer');
-      gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
-      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, width, height);
-      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
-      const normals = this.#createTexture(gl);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, height, 0, gl.RGBA, gl.FLOAT, null);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, normals, 0);
-      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
-      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE)
-        throw new Error('Incomplete NightLayer normal framebuffer');
-      this.#surface = { ...target, normals, depth, width, height };
+      this.#surface = new SurfaceTargets(gl, width, height);
     }
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.#surface.framebuffer);
-    gl.viewport(0, 0, width, height);
-    gl.disable(gl.SCISSOR_TEST);
-    gl.colorMask(true, true, true, true);
-    gl.depthMask(true);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clearDepth(1);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    this.#skyRenderer!.render(this.#map, gl, options);
-    this.#groundRenderer!.render(this.#map, gl, options);
-    const terrain = this.#map.getTerrain();
-    const source = terrain ? this.#map.getSource(terrain.source) : undefined;
-    const tileSize = source && 'tileSize' in source ? (source.tileSize ?? 512) * 2 : 256;
-    const tiles = this.#map.coveringTiles({
-      tileSize,
-      roundZoom: !terrain,
-      ...(terrain ? { terrain: this.#map.terrain, minzoom: 0, maxzoom: 22 } : {}),
-    });
+    this.#map.painter.context.setDirty();
+    this.#surface.beginLut();
+    const camera = atmosphereCamera(this.#map, options);
+    this.#forwardSurface!.render(gl, camera, options);
+    // Overlay the native map meshes only within the spherical horizon.
+    const tiles = this.#map.terrain
+      ? this.#map.terrain.tileManager.getRenderableTiles().map((tile) => tile.tileID)
+      : this.#map.coveringTiles({ tileSize: 256, roundZoom: true });
     this.#surfaceRenderer.render(this.#map, gl, tiles, options);
+    this.#viewAxis = viewAxis(camera);
+    this.#surfaceTiles = tiles;
     this.#surfaceReady = true;
     this.#surfaceSignature = signature;
+    this.#surfaceCoordinates = coordinates;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.#map.painter.context.setDirty();
   }
   render(context: WebGLRenderingContext | WebGL2RenderingContext, options: CustomRenderMethodInput): void {
-    if (!this.#surfaceReady || !this.#lightingProgram || !this.#lutTextures || !this.#starfield || this.#opacity <= 0)
+    if (
+      !this.#map ||
+      !supportsProjection(this.#map) ||
+      !this.#surfaceReady ||
+      !this.#lightingProgram ||
+      !this.#directionTransport ||
+      !this.#irradianceTexture ||
+      !this.#starfield ||
+      (this.#opacity <= 0 && !this.#capture)
+    )
       return;
     const gl = context as WebGL2RenderingContext;
+    const destination = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    [this.#logicalWidth, this.#logicalHeight] = this.#sensorSize(gl);
+    // The logical receiver resolves the inverse-LUT samples in linear radiance.
+    this.#receiver!.resize(gl, this.#logicalWidth, this.#logicalHeight);
     const program = this.#lightingProgram;
     const date = this.#date ?? new Date();
     const rotation = celestialRotation(date);
     const camera = atmosphereCamera(this.#map!, options);
-    const mercatorWeight = Math.max(0, Math.min(1, 1 - options.defaultProjectionData.projectionTransition));
+    const fade = atmosphereFade(this.#map.getZoom(), options.defaultProjectionData.projectionTransition);
+    const skyStrength = this.#atmosphere.sky * fade;
+    const fogStrength = this.#atmosphere.fog * fade;
+    const skyOpacity = this.#atmosphere.sky > 0 || this.#atmosphere.stars ? fade : 0;
+    const atmosphere = Math.max(skyStrength, fogStrength);
+    const development = this.#development || MAP_DEVELOPMENT;
+    const { lng, lat } = getSubsolarPoint(date);
+    const moon = lunarLight(date);
+    const solarDirection = [
+      Math.sin(radians(lng)) * Math.cos(radians(lat)),
+      Math.sin(radians(lat)),
+      Math.cos(radians(lng)) * Math.cos(radians(lat)),
+    ];
+    // Generate the light planes before shadow/star draws. The GPU generator
+    // owns its drawing state; restore the known map target without querying GL.
+    if (atmosphere > 0)
+      this.#directionTransport.update({
+        origin: camera.origin,
+        solarDirection,
+        moonPosition: moon.position,
+        moonRatio: moon.strength / 127500,
+      });
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, destination);
+    const terrain = this.#map!.terrain;
+    // Keep offscreen resident casters when fitting acquisition to the camera
+    // cone; no tiles are requested from the Sun's view.
+    const loaded =
+      fogStrength > 0 && terrain
+        ? terrain.tileManager.tileManager
+            .getRenderableIds()
+            .sort()
+            .flatMap((id) => {
+              const tile = terrain.tileManager.tileManager.getTileByID(id);
+              return tile?.dem ? [tile] : [];
+            })
+        : [];
+    const mieShadows = fogStrength > 0 && (loaded.length > 0 || !terrain);
+    if (mieShadows) {
+      // Existing terrain visibility is a local parallel-beam approximation.
+      // Its tangent direction follows the same refractive light inverse as
+      // surface illumination; the geographic caster mesh keeps its projection.
+      const shadowLight = this.#directionTransport.apparentLight(camera.origin, solarDirection);
+      this.#terrainShadow ??= new TerrainShadow(gl);
+      this.#shadowRenderer ??= new NativeSurface(true);
+      // Fitting and warping depend on actual screen coverage, including view
+      // direction. Unchanged views still reuse the caster map and its bounds.
+      const signature = JSON.stringify([
+        camera.origin.map((v) => v.toFixed(5)),
+        camera.inverseProjection,
+        camera.planarView,
+        camera.sphereView,
+        shadowLight,
+        this.#map!.getTerrain(),
+        this.#surfaceSignature,
+        loaded.map((tile) => [tile.tileID.key, tile.dem!.min, tile.dem!.max]),
+      ]);
+      const dirty =
+        signature !== this.#shadowSignature ||
+        loaded.length !== this.#shadowDEMs.length ||
+        // sourcedata already invalidates in-place DEM/border changes. Native
+        // needsTerrainPrepare is an upload flag, not a content revision; it can
+        // remain true indefinitely on offscreen tiles not selected as a DEM.
+        loaded.some((tile, i) => tile.dem !== this.#shadowDEMs[i]);
+      if (dirty) {
+        const casterTiles = terrain
+          ? terrainShadowTiles(
+              this.#surfaceTiles,
+              loaded.map((tile) => tile.tileID),
+              terrain!.tileManager.deltaZoom,
+            )
+          : [];
+        this.#terrainShadow!.begin(
+          gl,
+          camera,
+          shadowLight,
+          loaded.map((tile) => ({
+            canonical: tile.tileID.canonical,
+            minElevation: tile.dem!.min * terrain!.exaggeration,
+            maxElevation: tile.dem!.max * terrain!.exaggeration,
+          })),
+        );
+        if (terrain) this.#shadowRenderer!.render(this.#map!, gl, casterTiles, options, this.#terrainShadow!);
+        else this.#terrainShadow!.finish(gl);
+        this.#shadowSignature = signature;
+        this.#shadowDEMs = loaded.map((tile) => tile.dem!);
+        this.#shadowIntervalsReady = false;
+      }
+      if (!this.#shadowIntervalsReady) {
+        this.#shadowIntervals ??= new ShadowIntervals(gl);
+        this.#shadowIntervals.update(gl, this.#terrainShadow!);
+        this.#shadowIntervalsReady = true;
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, destination);
+    }
     const starYears = Math.max(-200, Math.min(200, (date.getTime() / 86400000 - 10957.5) / 365.25));
-    if (this.#stars) this.#starfield.points.render(gl, camera, rotation, mercatorWeight, starYears);
+    if (this.#atmosphere.stars && skyOpacity > 0)
+      this.#starfield.points.render(
+        gl,
+        camera,
+        rotation,
+        options,
+        starYears,
+        [this.#logicalWidth, this.#logicalHeight],
+        this.#directionTransport,
+      );
+    // Snapshot native colour before submitting the shadow integration. The copy
+    // preserves shared GL state using queries; do not put those behind this draw.
+    this.#copyMapColor(gl);
+    // Dedicated shadow integration on a decimated logical sensor grid. The
+    // composite evaluates its own endpoint Mie and upsamples the removed fraction.
+    if (mieShadows) {
+      const width = Math.ceil(this.#logicalWidth / MIE_SHADOW_STEP),
+        height = Math.ceil(this.#logicalHeight / MIE_SHADOW_STEP);
+      if (!this.#mieOcclusion || this.#mieOcclusion.width !== width || this.#mieOcclusion.height !== height) {
+        if (this.#mieOcclusion) {
+          gl.deleteTexture(this.#mieOcclusion.texture);
+          gl.deleteFramebuffer(this.#mieOcclusion.framebuffer);
+        }
+        this.#mieOcclusion = { ...this.#createTarget(gl, width, height), width, height };
+      }
+      const shadowProgram = this.#mieOcclusionProgram!;
+      gl.useProgram(shadowProgram);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.#mieOcclusion.framebuffer);
+      gl.bindVertexArray(this.#vertexArray!);
+      gl.viewport(0, 0, width, height);
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.STENCIL_TEST);
+      gl.disable(gl.SCISSOR_TEST);
+      gl.disable(gl.CULL_FACE);
+      gl.disable(gl.BLEND);
+      gl.colorMask(true, true, true, true);
+      gl.uniform3fv(uniformLocation(gl, shadowProgram, 'u_camera_origin'), camera.origin);
+      gl.uniform3fv(uniformLocation(gl, shadowProgram, 'u_solar_direction'), solarDirection);
+      gl.uniform3fv(uniformLocation(gl, shadowProgram, 'u_moon_position'), moon.position);
+      gl.uniform1f(uniformLocation(gl, shadowProgram, 'u_moon_ratio'), 0);
+      gl.uniform1f(uniformLocation(gl, shadowProgram, 'u_atmosphere_strength'), atmosphere);
+      gl.uniform1f(uniformLocation(gl, shadowProgram, 'u_fog_mie_g'), this.#lutMetadata!.mieG);
+      const radius = Math.hypot(...camera.origin);
+      gl.uniform1f(uniformLocation(gl, shadowProgram, 'u_ray4d_observer_height'), radius - 6371);
+      gl.uniform3fv(
+        uniformLocation(gl, shadowProgram, 'u_ray4d_observer_up'),
+        camera.origin.map((v) => v / radius),
+      );
+      gl.uniform1i(uniformLocation(gl, shadowProgram, 'u_terrain_mie_shadows'), 1);
+      for (const [unit, name, texture] of [[0, 'u_surface_ray', this.#surface!.rays]] as const) {
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.uniform1i(uniformLocation(gl, shadowProgram, name), unit);
+      }
+      this.#directionTransport.bind(shadowProgram);
+      this.#shadowIntervals!.bind(gl, shadowProgram, this.#terrainShadow!);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, destination);
+    }
     const now = performance.now();
-    if (this.#autoExposure) {
-      this.#exposureMeter ??= new AutoExposure();
-      this.#exposureMeter.update(gl, now);
+    if (development.autoExposure && this.#development) {
+      this.#exposureMeter ??= new AutoExposure(development.exposure);
+      this.#exposureMeter.update(gl, now, 1, development.compensation);
+      this.#development.exposure = this.#exposureMeter.value;
     }
     gl.useProgram(program);
     gl.bindVertexArray(this.#vertexArray!);
-    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    gl.viewport(0, 0, this.#logicalWidth, this.#logicalHeight);
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.STENCIL_TEST);
     gl.disable(gl.SCISSOR_TEST);
@@ -562,81 +729,136 @@ export class NightLayer implements CustomLayerInterface {
     gl.colorMask(true, true, true, true);
     gl.disable(gl.BLEND);
     gl.blendEquation(gl.FUNC_ADD);
-    gl.uniform1f(gl.getUniformLocation(program, 'u_opacity'), this.#opacity);
-    gl.uniform4fv(gl.getUniformLocation(program, 'u_night_color'), premultiply(this.#color));
-    gl.uniform4fv(gl.getUniformLocation(program, 'u_daytime_color'), premultiply(this.#daytimeColor));
-    gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_steps'), this.#twilightSteps);
-    gl.uniform1f(gl.getUniformLocation(program, 'u_twilight_attenuation'), this.#twilightAttenuation);
-    const { lng, lat } = getSubsolarPoint(date);
-    const moon = lunarLight(date);
-    gl.uniform3fv(gl.getUniformLocation(program, 'u_moon_position'), moon.position);
-    gl.uniform1f(gl.getUniformLocation(program, 'u_moon_phase'), moon.phaseAngle);
+    gl.uniform1f(uniformLocation(gl, program, 'u_sky_opacity'), skyOpacity);
+    gl.uniform4fv(uniformLocation(gl, program, 'u_twilight_color'), this.#twilight?.color ?? [0, 0, 0, 0.95]);
+    gl.uniform1f(uniformLocation(gl, program, 'u_twilight_attenuation'), this.#twilight?.attenuation ?? 0.5);
+    gl.uniform3fv(uniformLocation(gl, program, 'u_moon_position'), moon.position);
+    gl.uniform1f(uniformLocation(gl, program, 'u_moon_phase'), moon.phaseAngle);
     // Approximate extraterrestrial solar photopic illuminance, shared by lunar
     // and natural-night calibration. LUT RGB is daylight-normalized, not lux.
-    gl.uniform1f(gl.getUniformLocation(program, 'u_moon_ratio'), moon.strength / 127500);
-    gl.uniformMatrix3fv(gl.getUniformLocation(program, 'u_celestial_rotation'), false, rotation);
-    gl.uniform1i(gl.getUniformLocation(program, 'u_stars_enabled'), this.#stars ? 1 : 0);
-    gl.uniform1f(gl.getUniformLocation(program, 'u_milkyway_scale'), this.#starfield.backgroundScale);
-    gl.uniform3fv(gl.getUniformLocation(program, 'u_solar_direction'), [
-      Math.sin(radians(lng)) * Math.cos(radians(lat)),
-      Math.sin(radians(lat)),
-      Math.cos(radians(lng)) * Math.cos(radians(lat)),
-    ]);
-    gl.uniform1fv(gl.getUniformLocation(program, 'u_thresholds[0]'), THRESHOLDS);
-    gl.uniform2f(gl.getUniformLocation(program, 'u_viewport'), gl.drawingBufferWidth, gl.drawingBufferHeight);
-    const projectionMatrix = options.projectionMatrix;
-    gl.uniform1f(
-      gl.getUniformLocation(program, 'u_max_sun_edge'),
-      2 / (Math.abs(projectionMatrix[5]) * gl.drawingBufferHeight),
-    );
-    this.#copyMapColor(gl);
+    gl.uniform1f(uniformLocation(gl, program, 'u_moon_ratio'), moon.strength / 127500);
+    gl.uniformMatrix3fv(uniformLocation(gl, program, 'u_celestial_rotation'), false, rotation);
+    gl.uniform1i(uniformLocation(gl, program, 'u_stars_enabled'), this.#atmosphere.stars ? 1 : 0);
+    gl.uniform1i(uniformLocation(gl, program, 'u_disks_enabled'), this.#atmosphere.stars ? 1 : 0);
+    gl.uniform1f(uniformLocation(gl, program, 'u_sky_strength'), skyStrength);
+    gl.uniform1f(uniformLocation(gl, program, 'u_fog_strength'), fogStrength);
+    gl.uniform1f(uniformLocation(gl, program, 'u_milkyway_scale'), this.#starfield.backgroundScale);
+    gl.uniform3fv(uniformLocation(gl, program, 'u_solar_direction'), solarDirection);
+    gl.uniform1fv(uniformLocation(gl, program, 'u_thresholds[0]'), THRESHOLDS);
+    gl.uniform2f(uniformLocation(gl, program, 'u_viewport'), this.#logicalWidth, this.#logicalHeight);
     const layout = this.#lutMetadata!;
     const solarY = layout.solarRadiance.reduce((sum, value, i) => sum + value * [0.2126, 0.7152, 0.0722][i], 0);
+    // Ground coefficients multiply reflectance: Lambertian radiance is E / pi.
+    const nightIrradiance = (solarY * Math.sin(layout.solarAngularRadius) ** 2 * 0.0008) / 127500;
+    gl.uniform1f(uniformLocation(gl, program, 'u_night_irradiance'), nightIrradiance);
     gl.uniform1f(
-      gl.getUniformLocation(program, 'u_night_irradiance'),
-      // Ground coefficients multiply reflectance: Lambertian radiance is E / pi.
-      (solarY * Math.sin(layout.solarAngularRadius) ** 2 * 0.0008) / 127500,
-    );
-    gl.uniform1f(
-      gl.getUniformLocation(program, 'u_star_solar_irradiance'),
+      uniformLocation(gl, program, 'u_star_solar_irradiance'),
       solarY * Math.PI * Math.sin(layout.solarAngularRadius) ** 2,
     );
-    gl.uniform1f(gl.getUniformLocation(program, 'u_atmosphere_strength'), this.#atmosphere);
-    gl.uniform1f(gl.getUniformLocation(program, 'u_exposure'), this.#exposure + (this.#exposureMeter?.value ?? 0));
-    gl.uniform1f(gl.getUniformLocation(program, 'u_sky_reference'), layout.skyReference);
-    gl.uniform1f(gl.getUniformLocation(program, 'u_irradiance_height_max'), layout.irradianceHeightMax);
-    gl.uniform3fv(gl.getUniformLocation(program, 'u_camera_origin'), camera.origin);
-    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'u_inverse_projection'), false, camera.inverseProjection);
-    gl.uniformMatrix3fv(gl.getUniformLocation(program, 'u_mercator_view'), false, camera.mercatorView);
-    gl.uniformMatrix3fv(gl.getUniformLocation(program, 'u_globe_view'), false, camera.globeView);
-    gl.uniform1f(gl.getUniformLocation(program, 'u_mercator_weight'), mercatorWeight);
-    gl.uniform1fv(gl.getUniformLocation(program, 'u_direct_counts[0]'), layout.gridSize);
-    gl.uniform3fv(gl.getUniformLocation(program, 'u_direct_tiles'), this.#lutTiles!);
-    gl.uniform3fv(gl.getUniformLocation(program, 'u_direct_solar_radiance'), layout.solarRadiance);
-    gl.uniform1f(gl.getUniformLocation(program, 'u_direct_sun_cos_radius'), Math.cos(layout.solarAngularRadius));
-    gl.uniform1f(gl.getUniformLocation(program, 'u_fog_mie_g'), layout.mieG);
+    gl.uniform1f(uniformLocation(gl, program, 'u_atmosphere_strength'), atmosphere);
+    const fov = this.#map!.getVerticalFieldOfView();
+    const sensorHeight = this.#logicalHeight * SENSOR_PITCH_MM;
+    gl.uniform1f(uniformLocation(gl, program, 'u_photography_gain'), receiverGain(fov, sensorHeight));
+    gl.uniform1f(uniformLocation(gl, program, 'u_irradiance_height_max'), layout.irradianceHeightMax);
+    const axis = this.#irradianceAxis!;
+    gl.uniform4f(
+      uniformLocation(gl, program, 'u_irradiance_axis'),
+      axis.first,
+      axis.inverseStep,
+      axis.count,
+      layout.irradianceHeightCount,
+    );
+    gl.uniform3fv(uniformLocation(gl, program, 'u_camera_origin'), camera.origin);
+    const observerRadius = Math.hypot(...camera.origin);
+    gl.uniform1f(uniformLocation(gl, program, 'u_ray4d_observer_height'), observerRadius - 6371);
+    gl.uniform3fv(
+      uniformLocation(gl, program, 'u_ray4d_observer_up'),
+      camera.origin.map((v) => v / observerRadius),
+    );
+    gl.uniform4f(
+      uniformLocation(gl, program, 'u_sensor_projection'),
+      camera.inverseProjection[0],
+      camera.inverseProjection[5],
+      camera.inverseProjection[12],
+      camera.inverseProjection[13],
+    );
+    gl.uniform1f(uniformLocation(gl, program, 'u_fog_mie_g'), layout.mieG);
+    gl.uniform3fv(uniformLocation(gl, program, 'u_direct_solar_radiance'), layout.solarRadiance);
+    gl.uniform1f(uniformLocation(gl, program, 'u_direct_sun_cos_radius'), Math.cos(layout.solarAngularRadius));
     for (const [unit, name, texture] of [
-      [1, 'u_surface', this.#surface!.texture],
-      [3, 'u_normals', this.#surface!.normals],
-      [5, 'u_direct_rayleigh', this.#lutTextures[0]],
-      [6, 'u_direct_mie', this.#lutTextures[1]],
-      [7, 'u_direct_optical', this.#lutTextures[2]],
+      [0, 'u_surface_ray', this.#surface!.rays],
       [10, 'u_map_color', this.#mapColor!.texture],
-      [11, 'u_irradiance', this.#lutTextures[3]],
+      [11, 'u_irradiance', this.#irradianceTexture],
       [12, 'u_milkyway', this.#starfield.textures[0]],
       [13, 'u_star_points', this.#starfield.points.texture],
     ] as const) {
       gl.activeTexture(gl.TEXTURE0 + unit);
-      gl.bindTexture(unit >= 5 && unit <= 7 ? gl.TEXTURE_3D : gl.TEXTURE_2D, texture ?? null);
-      gl.uniform1i(gl.getUniformLocation(program, name), unit);
+      gl.bindTexture(gl.TEXTURE_2D, texture ?? null);
+      gl.uniform1i(uniformLocation(gl, program, name), unit);
     }
-    const metering = gl.getUniformLocation(program, 'u_metering');
-    this.#exposureMeter?.measure(gl, now, () => {
-      gl.uniform1i(metering, 1);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-    });
-    gl.uniform1i(metering, 0);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    this.#directionTransport.bind(program);
+    gl.uniform1i(uniformLocation(gl, program, 'u_terrain_mie_shadows'), mieShadows ? 1 : 0);
+    // A valid 2D sampler is needed even when shadows are disabled.
+    gl.activeTexture(gl.TEXTURE14);
+    gl.bindTexture(gl.TEXTURE_2D, mieShadows ? this.#mieOcclusion!.texture : this.#mapColor!.texture);
+    gl.uniform1i(uniformLocation(gl, program, 'u_shadowed_mie'), 14);
+    const artistic = this.#development === false;
+    const exportingPhysical = !!this.#capture && artistic;
+    const setDisplayGains = (enabled: boolean) => {
+      gl.uniform1f(
+        uniformLocation(gl, program, 'u_twilight_steps'),
+        enabled && artistic ? (this.#twilight?.steps ?? 0) : 0,
+      );
+      gl.uniform2f(uniformLocation(gl, program, 'u_display_star_limits'), 0.01, 2800);
+      gl.uniform1f(uniformLocation(gl, program, 'u_display_star_gain'), enabled && artistic ? 2 ** 20 : 1);
+      // Preserve the former atmosphere=0 fill, independently of sky/fog strength.
+      gl.uniform1f(
+        uniformLocation(gl, program, 'u_display_ambient_irradiance'),
+        enabled && artistic ? nightIrradiance * ((2 ** 25 - 1) * 0.25) : 0,
+      );
+    };
+    setDisplayGains(!exportingPhysical);
+    const drawReceiver = () => {
+      this.#surface!.beginReceiver(this.#receiver!.raw.texture);
+      gl.uniform1i(uniformLocation(gl, program, 'u_solar_pass'), 0);
+      for (const ground of [false, true]) {
+        if (!ground && skyOpacity <= 0) continue;
+        this.#surface!.selectGround(ground);
+        gl.uniform1i(uniformLocation(gl, program, 'u_ground_pass'), ground ? 1 : 0);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      }
+      if (this.#atmosphere.stars && skyOpacity > 0) {
+        this.#surface!.beginSolar();
+        gl.uniform1i(uniformLocation(gl, program, 'u_solar_pass'), 1);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        this.#surface!.endSolar();
+      }
+      gl.uniform1i(uniformLocation(gl, program, 'u_solar_pass'), 0);
+      this.#surface!.endReceiver();
+    };
+    drawReceiver();
+    if (this.#capture) this.#captureFrame(gl, date, fov);
+    if (exportingPhysical) {
+      // Only export frames need a second lighting draw: preserve physical RAW,
+      // then restore the artistic receiver image for the normal preview.
+      setDisplayGains(true);
+      drawReceiver();
+    }
+    this.#receiver!.prepareDisplay(
+      gl,
+      development.exposure,
+      this.#opacity,
+      this.#mapColor!.texture,
+      this.#surface!.rays,
+      skyOpacity,
+      development,
+      gl.drawingBufferWidth,
+      gl.drawingBufferHeight,
+    );
+    this.#exposureMeter?.measure(gl, now, () => this.#receiver!.draw(gl, true));
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, destination);
+    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    this.#receiver!.draw(gl, false);
     if (this.#exposureTimer !== undefined) clearTimeout(this.#exposureTimer);
     this.#exposureTimer = undefined;
     if (this.#exposureMeter?.needsFrame) {
@@ -644,6 +866,87 @@ export class NightLayer implements CustomLayerInterface {
         this.#exposureTimer = undefined;
         this.#map?.triggerRepaint();
       }, 33);
+    }
+  }
+
+  #captureFrame(gl: WebGL2RenderingContext, date: Date, fov: number): void {
+    const capture = this.#capture!;
+    this.#capture = undefined;
+    // EXR pixels are the logical sensor pixels of the receiver.
+    const width = this.#receiver!.width,
+      height = this.#receiver!.height;
+    const read = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING),
+      draw = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING);
+    const buffer = gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING);
+    const pack = [gl.PACK_ALIGNMENT, gl.PACK_ROW_LENGTH, gl.PACK_SKIP_PIXELS, gl.PACK_SKIP_ROWS].map(
+      (parameter) => [parameter, gl.getParameter(parameter)] as const,
+    );
+    try {
+      if (gl.isContextLost()) throw new Error('WebGL context lost during EXR capture');
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.#receiver!.raw.framebuffer);
+      const pixels = new Float32Array(width * height * 4);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      for (const [parameter] of pack) gl.pixelStorei(parameter, parameter === gl.PACK_ALIGNMENT ? 1 : 0);
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, pixels);
+      if (gl.isContextLost()) throw new Error('WebGL context lost during EXR capture');
+      const development = this.#development || MAP_DEVELOPMENT;
+      const exposureEV = capture.exposure === 'preview' ? development.exposure : 0;
+      const gain = 2 ** exposureEV;
+      if (gain !== 1)
+        for (let i = 0; i < pixels.length; i += 4) {
+          pixels[i] *= gain;
+          pixels[i + 1] *= gain;
+          pixels[i + 2] *= gain;
+        }
+      const center = this.#map!.getCenter();
+      const rays = this.#surface!.readRays();
+      const depth = new Float32Array(width * height);
+      for (let i = 0; i < depth.length; i++) depth[i] = opticalDepthMeters(rays, this.#viewAxis, i * 4);
+      const exr = encodeEXR(
+        width,
+        height,
+        pixels,
+        {
+          model: 'NightLayer ideal linear RGB receiver; normalized, not sensor electrons',
+          colorSpace: 'linear sRGB / D65',
+          exportExposureEV: exposureEV,
+          exportExposureMode: capture.exposure,
+          sensorHeightMm: this.#logicalHeight * SENSOR_PITCH_MM,
+          sensorWidthMm: this.#logicalWidth * SENSOR_PITCH_MM,
+          logicalWidth: this.#logicalWidth,
+          logicalHeight: this.#logicalHeight,
+          sensorPitchMmPerLogicalPixel: SENSOR_PITCH_MM,
+          focalLengthMm: focalLength(fov, this.#logicalHeight * SENSOR_PITCH_MM),
+          verticalFovDegrees: fov,
+          referenceExposure: 'f/4, 1/125 s, ISO 100 at exposure 0 EV',
+          date: date.toISOString(),
+          center: [center.lng, center.lat],
+          zoom: this.#map!.getZoom(),
+          pitch: this.#map!.getPitch(),
+          bearing: this.#map!.getBearing(),
+          roll: this.#map!.getRoll(),
+          atmosphere: this.#atmosphere,
+          previewExposureStops: development.exposure,
+          previewDisplayGamma: development.gamma,
+          displayGammaBakedIn: false,
+          previewExposureBakedIn: false,
+          displayLightingBakedIn: false,
+          opacityBakedIn: false,
+          depthChannel: 'Z',
+          depthUnits: 'metres',
+          depthDefinition: 'physical optical-axis distance to the ground sample',
+          depthInfinity: 'positive infinity for sky or no forward surface',
+        },
+        depth,
+      );
+      capture.resolve(new Blob([exr], { type: 'image/x-exr' }));
+    } catch (error) {
+      capture.reject(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, read);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, draw);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
+      for (const [parameter, value] of pack) gl.pixelStorei(parameter, value);
     }
   }
 }
@@ -659,203 +962,155 @@ function createProgram(gl: WebGL2RenderingContext, fragment: string, vertexSourc
   return compileProgram(gl, fragment, vertexSource);
 }
 
-const lightingFragment = `#version 300 es
+// The shadow pass uses the same finite-ray setup and cumulative fit as the
+// composite. Dead-code elimination drops unused transmission, Rayleigh, phase
+// and lunar output. It uses the ground-only resolved inverse LUT of every
+// MIE_SHADOW_STEP-th logical pixel and
+// stores the removed fraction of the solar Mie and its path length (RGBA32F;
+// w < 0: nothing occluded). The composite upsamples it bilaterally.
+const mieOcclusionFragment = `#version 300 es
 precision highp float;
 precision highp int;
 precision highp sampler2D;
-precision highp sampler3D;
-uniform sampler2D u_surface, u_normals, u_irradiance, u_map_color;
+${inverseLookupGLSL}
+uniform sampler2D u_surface_ray;
+uniform vec3 u_camera_origin,u_solar_direction,u_moon_position;
+uniform float u_moon_ratio,u_fog_mie_g,u_atmosphere_strength;
+${hermiteScatteringGLSL}
+${hermiteOpticalGLSL}
+out vec4 fragColor;
+void main(){
+   ivec2 pixel=min(ivec2(gl_FragCoord.xy)*${MIE_SHADOW_STEP},textureSize(u_surface_ray,0)-1);
+   vec4 ray=texelFetch(u_surface_ray,pixel,0);
+   float distance=ray.z;
+  terrainMieFraction=vec3(0);
+  terrainMieLength=-1.0;
+   if(distance>1e-6){
+     vec3 transmission,scattering;
+     atmosphereRay(u_camera_origin,decodeDirection(ray.xy),distance,false,transmission,scattering);
+  }
+  fragColor=vec4(terrainMieFraction,terrainMieLength);
+}`;
+
+const lightingFragment = `#version 300 es
+#define NIGHTLAYER_COMPOSITE_PASS
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+precision highp sampler2DArray;
+${inverseLookupGLSL}
+uniform sampler2D u_surface_ray, u_irradiance, u_map_color;
 uniform sampler2D u_milkyway, u_star_points;
+uniform bool u_ground_pass;
+uniform bool u_solar_pass;
 uniform mat3 u_celestial_rotation;
 uniform bool u_stars_enabled;
+uniform bool u_disks_enabled;
+uniform float u_sky_strength,u_fog_strength;
 uniform float u_star_solar_irradiance, u_milkyway_scale;
-uniform sampler3D u_direct_rayleigh, u_direct_mie, u_direct_optical;
-uniform float u_direct_counts[5], u_direct_sun_cos_radius;
-uniform vec3 u_direct_tiles, u_direct_solar_radiance;
-uniform float u_atmosphere_strength, u_fog_mie_g, u_sky_reference;
+uniform float u_display_star_gain, u_display_ambient_irradiance;
+uniform vec2 u_display_star_limits;
+uniform float u_direct_sun_cos_radius;
+uniform vec3 u_direct_solar_radiance;
+uniform float u_atmosphere_strength, u_fog_mie_g;
+uniform float u_sky_opacity;
 uniform float u_irradiance_height_max;
-uniform float u_exposure;
-uniform bool u_metering;
-uniform float u_max_sun_edge;
+// First lattice altitude (deg), lattices per degree, lattice count, height rows.
+uniform vec4 u_irradiance_axis;
+uniform float u_photography_gain;
 uniform vec3 u_camera_origin;
-uniform mat4 u_inverse_projection;
-uniform mat3 u_mercator_view, u_globe_view;
-uniform float u_mercator_weight;
+uniform vec4 u_sensor_projection;
 uniform vec2 u_viewport;
 uniform vec3 u_solar_direction;
 uniform vec3 u_moon_position;
 uniform float u_moon_ratio, u_moon_phase, u_night_irradiance;
-uniform vec4 u_night_color, u_daytime_color;
-uniform float u_opacity, u_twilight_steps, u_twilight_attenuation;
-uniform float u_thresholds[15];
-out vec4 fragColor;
-vec3 displayRadiance(vec3 linear) {
-  // Narkowicz ACES filmic fit (not a full ACES color-management pipeline).
-  // Values beyond this bound already map to display white; cap before squaring.
-  linear = clamp(linear * exp2(u_exposure), 0.0, 64.0);
-  linear = clamp((linear * (2.51 * linear + 0.03)) / (linear * (2.43 * linear + 0.59) + 0.14), 0.0, 1.0);
-  vec3 color = mix(1.055 * pow(linear, vec3(1.0 / 2.4)) - 0.055,
-                   12.92 * linear, lessThanEqual(linear, vec3(0.0031308)));
-  // Stable, zero-centred half-LSB dither only at the final display conversion.
-  float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) - 0.5;
-  vec3 dithered = clamp(color + noise / 255.0, 0.0, 1.0);
-  dithered = mix(color, dithered, greaterThan(color, vec3(0.0)));
-  return mix(dithered, color, greaterThanEqual(color, vec3(1.0)));
-}
-float directAxis(float coordinate, int axis) {
-  return clamp(coordinate, 0.0, 1.0) * (u_direct_counts[axis] - 1.0);
-}
-void directTransport(vec3 geometry, vec2 solar, float branch, float airLength, vec2 phases,
-                     out vec3 transmission, out vec3 scattering) {
-  vec3 p = vec3(directAxis(geometry.x, 0), directAxis(geometry.y, 1), directAxis(geometry.z, 2));
-  vec2 angular = vec2(directAxis(solar.x, 3), directAxis(solar.y, 4));
-  vec2 counts = vec2(u_direct_counts[3], u_direct_counts[4]);
-  vec2 low = min(floor(angular), counts - 2.0), f = angular - low;
-  vec3 block = vec3(u_direct_counts[2], u_direct_counts[1], u_direct_counts[0]);
-  vec3 tau = texture(u_direct_optical, (vec3(p.z, p.y, branch * block.z + p.x) + 0.5) / (block * vec3(1.0, 1.0, 2.0))).rgb;
-  vec3 rayleigh = vec3(0.0), mie = vec3(0.0);
-  for (int corner = 0; corner < 4; corner++) {
-    vec2 offset = vec2(float(corner & 1), float((corner >> 1) & 1));
-    vec2 w = mix(1.0 - f, f, offset), a = low + offset;
-    int page = (int(branch) * int(counts.x) + int(a.x)) * int(counts.y) + int(a.y);
-    ivec3 tiles = ivec3(u_direct_tiles);
-    vec3 tile = vec3(page % tiles.x, (page / tiles.x) % tiles.y, page / (tiles.x * tiles.y));
-    vec3 position = (tile * (block + 2.0) + p.zyx + 1.5) / ((block + 2.0) * u_direct_tiles);
-    rayleigh += texture(u_direct_rayleigh, position).rgb * w.x * w.y;
-    mie += texture(u_direct_mie, position).rgb * w.x * w.y;
-  }
-  transmission = exp(-tau * airLength);
-  scattering = (rayleigh * phases.x + mie * phases.y) * airLength;
-}
-void transportAngles(vec3 up, vec3 direction, vec3 light, float mu, out vec2 solar, out vec2 phases) {
-  float sun = clamp(dot(up, light), -1.0, 1.0);
-  float nu = clamp(dot(direction, light), -1.0, 1.0);
-  float denominator = sqrt(max(0.0, (1.0 - mu * mu) * (1.0 - sun * sun)));
-  float azimuth = denominator > 1e-7 ? acos(clamp((nu - mu * sun) / denominator, -1.0, 1.0)) : 0.0;
-  solar = vec2((asinh(sun * sinh(4.0)) / 4.0 + 1.0) * 0.5, azimuth / ${Math.PI});
-  float phaseR = 3.0 / (16.0 * ${Math.PI}) * (1.0 + nu * nu);
-  float g = u_fog_mie_g;
-  float phaseM = 3.0 / (8.0 * ${Math.PI}) * (1.0 - g * g) / (2.0 + g * g)
-    * (1.0 + nu * nu) / pow(1.0 + g * g - 2.0 * g * nu, 1.5);
-  phases = vec2(phaseR, phaseM);
-}
-void atmosphereRay(vec3 origin, vec3 direction, float distance,
-                   out vec3 transmission, out vec3 scattering, out bool occluded) {
-  transmission = vec3(1.0); scattering = vec3(0.0); occluded = false;
-  float radius = length(origin), t = dot(origin, direction);
-  float h = radius - 6371.0, radial = h * (12742.0 + h);
-  float topRadial = (100.0 - h) * (12842.0 + h);
-  float topDiscriminant = t * t + topRadial;
-  if (topDiscriminant < 0.0) return;
-  float topRoot = sqrt(topDiscriminant);
-  float end = t > 0.0 ? topRadial / max(t + topRoot, 1e-20) : -t + topRoot;
-  if (end <= 0.0) return;
-  float start = 0.0;
-  // Vacuum before entry; below-ground density remains zero.
-  if (h > 100.0) start = (radial - 100.0 * 12842.0) / max(-t + topRoot, 1e-20);
-  float groundDiscriminant = t * t - radial;
-  if (h < 0.0) start = -t + sqrt(max(0.0, groundDiscriminant));
-  float groundDistance = 1e30;
-  if (h >= 0.0 && t < 0.0 && groundDiscriminant >= 0.0)
-    groundDistance = max(0.0, radial / max(-t + sqrt(groundDiscriminant), 1e-20));
-  occluded = h >= 0.0 && t < 0.0 && groundDiscriminant >= 0.0 && groundDistance <= distance + 0.001;
-  end = min(end, distance);
-  end = min(end, groundDistance);
-  // Preserve Earth occlusion in vacuum; only transport through air is skipped.
-  if (u_atmosphere_strength <= 0.0) return;
-  if (end <= start) return;
-  origin += direction * start;
-  radius = length(origin);
-  vec3 up = origin / radius;
-  h = clamp(radius - 6371.0, 0.0, 100.0);
-  float mu = clamp(dot(up, direction), -1.0, 1.0);
-  float horizon = -sqrt(h * (12742.0 + h)) / (6371.0 + h);
-  bool ground = mu < horizon;
-  float view = sqrt(clamp((mu - horizon) / (ground ? -1.0 - horizon : 1.0 - horizon), 0.0, 1.0));
-  t = (6371.0 + h) * mu;
-  topRadial = (100.0 - h) * (12842.0 + h);
-  topRoot = sqrt(max(0.0, t * t + topRadial));
-  float maximum = ground ? h * (12742.0 + h) / max(-t + sqrt(max(0.0, t * t - h * (12742.0 + h))), 1e-20)
-    : (t > 0.0 ? topRadial / max(t + topRoot, 1e-20) : -t + topRoot);
-  float airLength = min(end - start, maximum);
-  if (airLength <= 0.0) return;
-  vec3 geometry = vec3(log(1.0 + sqrt(h)) / log(11.0), view, log(1.0 + 255.0 * airLength / max(maximum, 1e-20)) / log(256.0));
-  vec2 solar, phases;
-  transportAngles(up, direction, u_solar_direction, mu, solar, phases);
-  directTransport(geometry, solar, ground ? 0.0 : 1.0, airLength, phases, transmission, scattering);
-  if (u_moon_ratio > 1e-12) {
-    vec3 moonTransmission, moonScattering;
-    transportAngles(up, direction, normalize(u_moon_position - origin), mu, solar, phases);
-    directTransport(geometry, solar, ground ? 0.0 : 1.0, airLength, phases, moonTransmission, moonScattering);
-    scattering += moonScattering * u_moon_ratio;
-  }
-}
-ivec2 surfacePixel(ivec2 pixel, bool hasMapColor) {
-  // Position/normal targets have exactly the framebuffer's resolution.
-  // Resolve MSAA coverage once, then use the same texel for both attachments.
-  if (texelFetch(u_surface, pixel, 0).a > 0.0 || !hasMapColor) return pixel;
-  ivec2 result = pixel;
-  float nearest = 1e30;
-  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
-    ivec2 offset = ivec2(x, y);
-    float distance = dot(vec2(offset), vec2(offset));
-    if (distance >= nearest) continue;
-    ivec2 candidate = clamp(pixel + offset, ivec2(0), textureSize(u_surface, 0) - 1);
-    if (texelFetch(u_surface, candidate, 0).a <= 0.0) continue;
-    result = candidate;
-    nearest = distance;
-  }
-  return result;
-}
+${twilightGLSL}
+layout(location=0) out vec4 fragColor;
+${earthIntersectionGLSL}
+${inverseSkyGLSL}
+${hermiteScatteringGLSL}
+${hermiteOpticalGLSL}
 float horizonDip(float height) {
   float h = max(0.0, height) * 0.001;
   return atan(sqrt(h * (12742.0 + h)), 6371.0);
+}
+// Artistic boosts only: return to physical gain in bright surroundings.
+// Both the physical-brightness ramp and the added-light fade are linear.
+// Stop-valued UI controls only set the maximum multiplier, not the fade shape.
+// The thresholds are display policy, not changes to atmospheric extinction.
+float darkPreviewGain(float gain, float brightness, float darkLimit, float brightLimit) {
+  if (gain <= 1.0) return gain;
+  float darkness = 1.0 - clamp((brightness - darkLimit) / (brightLimit - darkLimit), 0.0, 1.0);
+  return 1.0 + (gain - 1.0) * darkness;
+}
+float photopicScale() {
+  // Convert daylight-normalized radiance/irradiance into cd/m² or lux.
+  return 127500.0 / max(u_star_solar_irradiance, 1e-20);
 }
 void surfaceIrradiance(float altitude, float height, out vec3 sky, out vec3 sun) {
   sky = vec3(0.0); sun = vec3(0.0);
   ivec2 size = textureSize(u_irradiance, 0);
   float h = clamp(height, 0.0, u_irradiance_height_max);
-  float row = sqrt(h / u_irradiance_height_max) * float(size.y / 2 - 1);
+  int heightCount = int(u_irradiance_axis.w);
+  float row = sqrt(h / u_irradiance_height_max) * float(heightCount - 1);
   altitude += degrees(horizonDip(h));
-  int low = 0, high = size.x - 1;
-  if (altitude < texelFetch(u_irradiance, ivec2(0, 0), 0).a) return;
-  while (high - low > 1) {
-    int middle = (low + high) / 2;
-    if (altitude < texelFetch(u_irradiance, ivec2(middle, 0), 0).a) high = middle;
-    else low = middle;
-  }
-  vec4 a = texelFetch(u_irradiance, ivec2(low, 0), 0), b = texelFetch(u_irradiance, ivec2(high, 0), 0);
-  float fraction = clamp((altitude - a.a) / (b.a - a.a), 0.0, 1.0);
+  if (altitude < u_irradiance_axis.x) return;
+  // Every non-uniform knot lies on this uniform lattice; the stored fractional
+  // knot index is linear between lattice points, so this is exactly the
+  // piecewise-linear knot interpolation, without a per-pixel search.
+  int count = int(u_irradiance_axis.z);
+  float lattice = min((altitude - u_irradiance_axis.x) * u_irradiance_axis.y, float(count - 1));
+  int i = min(int(lattice), count - 2);
+  int first = 2 * heightCount * size.x + i;
+  float a = texelFetch(u_irradiance, ivec2(first % size.x, first / size.x), 0).r;
+  float b = texelFetch(u_irradiance, ivec2((first + 1) % size.x, (first + 1) / size.x), 0).r;
+  float column = mix(a, b, lattice - float(i));
   // Shared solar knots and a square-root height grid allow hardware bilinear interpolation.
-  vec2 coordinate = vec2(float(low) + fraction + 0.5, row + 0.5) / vec2(size);
+  vec2 coordinate = vec2(column + 0.5, row + 0.5) / vec2(size);
   sky = texture(u_irradiance, coordinate).rgb;
-  sun = texture(u_irradiance, coordinate + vec2(0.0, 0.5)).rgb;
+  sun = texture(u_irradiance, coordinate + vec2(0.0, float(heightCount)/float(size.y))).rgb;
+}
+float ambientIrradiance() {
+  // Physical night light retains its atmosphere/vacuum transition. Map-only
+  // visibility fill is a separate, fixed addition; physical exports use zero.
+  return u_night_irradiance * mix(.25, 1.0, u_atmosphere_strength)
+    + u_display_ambient_irradiance;
+}
+vec3 missingSurfaceRadiance(vec3 up, float height, vec3 towardCamera) {
+  if(u_twilight_steps>0.0)
+    return twilightIllumination(clamp(dot(up,u_solar_direction),-1.0,1.0));
+  // No albedo tile: show the diffuse sky illumination of a horizontal surface,
+  // not a second atmospheric path or the direct solar/lunar beam. These LUT
+  // coefficients use the same radiance units as the normal surface lighting.
+  vec3 sky, unusedSun;
+  surfaceIrradiance(degrees(asin(clamp(dot(up, u_solar_direction), -1.0, 1.0))), height, sky, unusedSun);
+  vec3 moonDirection = normalize(u_moon_position - up * (6371.0 + height * .001));
+  vec3 moonSky;
+  surfaceIrradiance(degrees(asin(clamp(dot(up, moonDirection), -1.0, 1.0))), height, moonSky, unusedSun);
+  vec3 illumination = (sky + moonSky * u_moon_ratio) * u_atmosphere_strength
+    + vec3(ambientIrradiance());
+  return illumination * max(0.0, dot(up, towardCamera));
 }
 vec3 surfaceRadiance(vec3 color, vec3 normal, vec3 up, float height) {
   float solarHeight = clamp(dot(up, u_solar_direction), -1.0, 1.0);
   vec3 illumination;
-  float weight;
   if (u_twilight_steps > 0.0) {
-    // Twilight categories depend only on solar altitude, never on terrain or sky brightness.
-    float band = 1.0;
-    for (int i = 1; i < 15; i++) if (solarHeight < u_thresholds[i]) band += 1.0;
-    band = ceil(min(band, u_twilight_steps));
-    if (solarHeight > u_thresholds[0]) band = 0.0;
-    weight = 1.0 - pow(clamp(band / u_twilight_steps, 0.0, 1.0), u_twilight_attenuation);
-    illumination = vec3(weight);
+    illumination = twilightIllumination(solarHeight);
   } else {
     vec3 sky, sun;
     surfaceIrradiance(degrees(asin(solarHeight)), height, sky, sun);
-    float atmosphericDay = clamp(dot(sky, vec3(0.2126, 0.7152, 0.0722)) / u_sky_reference, 0.0, 1.0);
     // Visible fraction of the finite solar disk across the geometric horizon.
     float solarRadius = acos(u_direct_sun_cos_radius);
     float horizonPosition = clamp((asin(solarHeight) + horizonDip(height)) / solarRadius, -1.0, 1.0);
     float visibleSun = (acos(-horizonPosition) + horizonPosition * sqrt(max(0.0, 1.0 - horizonPosition * horizonPosition))) / ${Math.PI};
-    vec3 vacuumSun = u_direct_solar_radiance * (${Math.PI} * sin(solarRadius) * sin(solarRadius)) * visibleSun;
+    // Irradiance LUTs store E/pi for Lambertian surface radiance. The solar
+    // disk's pi*sin(radius)^2 solid-angle factor loses pi in that conversion.
+    vec3 vacuumSun = u_direct_solar_radiance * (sin(solarRadius) * sin(solarRadius)) * visibleSun;
     sky *= u_atmosphere_strength;
     sun = mix(vacuumSun, sun, u_atmosphere_strength);
     illumination = sky * clamp(0.5 * (1.0 + dot(normal, up)), 0.0, 1.0)
-      + sun * max(0.0, dot(normal, u_solar_direction));
+      + sun * max(0.0, dot(normal, u_atmosphere_strength>0.0
+        ?refractionLight(height*.001,up,u_solar_direction):u_solar_direction));
     vec3 moonDirection = normalize(u_moon_position - up * (6371.0 + height * .001));
     float moonAltitude = asin(clamp(dot(up, moonDirection), -1.0, 1.0));
     vec3 moonSky, moonSun;
@@ -864,82 +1119,126 @@ vec3 surfaceRadiance(vec3 color, vec3 normal, vec3 up, float height) {
     float moonVisible = (acos(-moonHorizon) + moonHorizon * sqrt(max(0.0, 1.0 - moonHorizon * moonHorizon))) / ${Math.PI};
     vec3 vacuumMoon = u_direct_solar_radiance * (sin(solarRadius) * sin(solarRadius)) * moonVisible;
     illumination += u_moon_ratio * (moonSky * u_atmosphere_strength * clamp(.5 * (1.0 + dot(normal, up)), 0.0, 1.0)
-      + mix(vacuumMoon, moonSun, u_atmosphere_strength) * max(0.0, dot(normal, moonDirection)));
+      + mix(vacuumMoon, moonSun, u_atmosphere_strength)
+        * max(0.0, dot(normal, u_atmosphere_strength>0.0
+          ?refractionLight(height*.001,up,moonDirection):moonDirection)));
     // Combined stars/Milky Way/airglow/zodiacal floor: not another copy of each
     // catalogue star. In vacuum retain only a rough extraterrestrial-star share.
-    illumination += vec3(u_night_irradiance * mix(.25, 1.0, u_atmosphere_strength))
+    // Map fill is constant through day/twilight/night and independent of sky/fog.
+    // Camera/physical export retain only the physical night illumination.
+    illumination += vec3(ambientIrradiance())
       * clamp(.5 * (1.0 + dot(normal, up)), 0.0, 1.0);
-    weight = mix(visibleSun, atmosphericDay, u_atmosphere_strength);
   }
-  float day = weight * u_daytime_color.a;
-  float night = (1.0 - weight) * u_night_color.a;
-  illumination = illumination * (1.0 - day - night)
-    + weight * u_daytime_color.rgb + (1.0 - weight) * u_night_color.rgb;
-  return pow(clamp(color, 0.0, 1.0), vec3(2.2)) * illumination;
+  return color * illumination;
 }
-void main() {
-  vec2 screen = u_metering ? gl_FragCoord.xy / 16.0 * u_viewport : gl_FragCoord.xy;
-  vec4 mapColor = texelFetch(u_map_color, ivec2(screen), 0);
-  ivec2 pixel = surfacePixel(ivec2(screen), mapColor.a > 0.0);
-  vec4 surface = texelFetch(u_surface, pixel, 0);
-  if (surface.a <= 0.0) {
-    fragColor = u_metering ? vec4(0.0) : mapColor;
-    return;
+// Native map colour is rendered at device resolution; one logical sensor pixel
+// receives the exact area average of the device pixels it covers. Averaging
+// is done on adjusted linear premultiplied albedo, since reflected radiance is
+// linear in albedo; native colour is kept only for coverage and pass-through.
+vec4 logicalMapColor(ivec2 pixel, out vec3 linearAlbedo) {
+  vec2 size = vec2(textureSize(u_map_color, 0));
+  vec2 scale = size / u_viewport;
+  vec2 lo = vec2(pixel) * scale, hi = min(lo + scale, size);
+  vec4 color = vec4(0);
+  linearAlbedo = vec3(0);
+  for (int y = int(floor(lo.y)); y < int(ceil(hi.y)); y++)
+    for (int x = int(floor(lo.x)); x < int(ceil(hi.x)); x++) {
+      vec2 overlap = max(vec2(0), min(hi, vec2(x, y) + 1.0) - max(lo, vec2(x, y)));
+      float weight = overlap.x * overlap.y;
+      vec4 value = texelFetch(u_map_color, ivec2(x, y), 0);
+      color += value * weight;
+      if (value.a > 0.0)
+        linearAlbedo += pow(clamp(value.rgb / value.a, 0.0, 1.0), vec3(2.2)) * value.a * weight;
+    }
+  vec2 area = hi - lo;
+  linearAlbedo /= area.x * area.y;
+  return color / (area.x * area.y);
+}
+vec4 shadeSurfaceSample(vec2 screen,vec4 hit,vec3 direction,vec2 dx,vec2 dy) {
+  terrainMiePixel = ivec2(screen);
+  bool hasSurface = hit.z > 0.0;
+  float distance = hasSurface ? hit.z : 1e30;
+  vec3 up = vec3(0.0);
+  float height = 0.0;
+  uint attributes = 0u;
+  bool fallback = false;
+  if (hasSurface) {
+    vec3 endpoint = u_camera_origin + direction * distance;
+    float radius = length(endpoint);
+    if (radius <= 0.0) return vec4(0.0, 0.0, 0.0, -2.0);
+    up = endpoint / radius;
+    attributes = uint(hit.w);
+    fallback = (attributes >> 20) != 0u;
+    height = fallback ? 0.0 : (radius - 6371.0) * 1000.0;
   }
-  vec4 normalHeight = texelFetch(u_normals, pixel, 0);
-  vec3 up = normalize(surface.xyz);
+  // The inverse LUT owns coverage. Native colour cannot turn a sky sample into
+  // ground, and missing native colour cannot turn a ground sample into sky.
+  vec3 mapLinear = vec3(0.0);
+  vec4 mapColor = vec4(0.0);
+  if (hasSurface && !fallback) mapColor = logicalMapColor(ivec2(screen), mapLinear);
   vec2 clip = screen / u_viewport * 2.0 - 1.0;
-  vec3 view = (u_inverse_projection * vec4(clip, 0.0, 1.0)).xyz;
-  vec3 direction = vec3(0.0);
-  float kilometresPerDepth = 0.0;
-  if (u_mercator_weight > 0.0) {
-    vec3 ray = u_mercator_view * view;
-    direction += normalize(ray) * u_mercator_weight;
-    kilometresPerDepth += length(ray) * u_mercator_weight;
-  }
-  if (u_mercator_weight < 1.0) {
-    vec3 ray = u_globe_view * view;
-    direction += normalize(ray) * (1.0 - u_mercator_weight);
-    kilometresPerDepth += length(ray) * (1.0 - u_mercator_weight);
-  }
-  direction = normalize(direction);
-  vec3 rayDx = dFdx(direction), rayDy = dFdy(direction);
-  float sunAngle = atan(length(cross(direction, u_solar_direction)), dot(direction, u_solar_direction));
-  float radius = acos(u_direct_sun_cos_radius);
-  // Derivatives across unrelated terrain/sky endpoints must not spread the disk
-  // around the planet's limb. Bound softness by one angular screen pixel.
-  float edge = clamp(0.5 * fwidth(sunAngle), 1e-7, max(u_max_sun_edge, 1e-7));
-  float sunCoverage = 1.0 - smoothstep(radius - edge, radius + edge, sunAngle);
+  // Optical sensor acceptance is a lens property, independent of terrain slope
+  // and map projection. It is not another world-space viewing-direction solve.
+  vec3 sensor = vec3(clip * u_sensor_projection.xy + u_sensor_projection.zw, -1.0);
+  float angularArea = abs(u_sensor_projection.x * u_sensor_projection.y) / pow(length(sensor), 3.0);
   vec3 transmission, scattering;
-  bool occluded;
-  // Keep the sky's viewing direction, but stop at captured terrain depth so
-  // mountains hide the air behind them. Alpha stores clip W (view-space depth),
-  // not geographic distance; convert it with the same observer-local ray metric.
-  // Sky has unbounded depth. The ray function also clips to Earth/atmosphere.
-  float distance = surface.a * kilometresPerDepth;
-  atmosphereRay(u_camera_origin, direction, distance, transmission, scattering, occluded);
-  vec3 linear = vec3(0.0);
-  if (mapColor.a > 0.0) {
-    vec3 tileColor = clamp(mapColor.rgb / mapColor.a, 0.0, 1.0);
-    linear = surfaceRadiance(tileColor, normalize(normalHeight.xyz), up, normalHeight.a) * mapColor.a;
+  if ((hasSurface ? u_fog_strength : u_sky_strength) > 0.0)
+    atmosphereRay(u_camera_origin,direction,distance,!hasSurface,transmission,scattering);
+  else {
+    transmission=vec3(1);scattering=vec3(0);
+    atmosphereBackgroundOrigin=u_camera_origin;atmosphereBackgroundDirection=direction;
+    // Sky intensity controls radiance, not the apparent position of stars.
+    if(!hasSurface&&u_refraction&&u_stars_enabled)
+      refractionExternal(u_camera_origin,max(u_ray4d_observer_height,0.0),direction);
   }
-  if (mapColor.a < 1.0 && normalHeight.a < 100000.0 && u_atmosphere_strength > 0.0) {
-    vec3 skyTransmission, skyScattering;
-    bool skyOccluded;
-    // Fill missing ground tiles with the local zenith sky, before viewing-ray transport.
-    vec3 skyOrigin = up * (6371.0 + max(0.0, normalHeight.a * 0.001));
-    atmosphereRay(skyOrigin, up, 1e30, skyTransmission, skyScattering, skyOccluded);
-    linear += skyScattering * u_atmosphere_strength * (1.0 - mapColor.a);
+  // Keep the central celestial ray while evaluating its footprint below.
+  vec3 backgroundDirection=atmosphereBackgroundDirection;
+  vec3 backgroundOrigin=atmosphereBackgroundOrigin;
+  vec3 backgroundMoonDirection=normalize(u_moon_position-backgroundOrigin);
+  vec3 linear = vec3(0.0);
+  vec3 ground = vec3(0.0);
+  vec3 pointStars = vec3(0.0);
+  if (hasSurface) {
+    if (mapColor.a > 0.0)
+      ground = surfaceRadiance(mapLinear, unpackNormal(attributes), up, height);
+    if (mapColor.a < 1.0)
+      ground += missingSurfaceRadiance(up, height, -direction) * (1.0 - mapColor.a);
+    ground *= mix(vec3(1.0), transmission, u_fog_strength);
   }
   // A position on the ground is not a solar-disk background, even without tiles.
-  if (!occluded && normalHeight.a >= 100000.0) {
-    vec3 background = u_direct_solar_radiance * sunCoverage;
-    vec3 toMoon = u_moon_position - u_camera_origin;
-    vec3 moonDirection = normalize(toMoon);
+  if (!hasSurface) {
+    mat3 angularBasis = skyBasis(direction);
+    vec3 rayDx = angularBasis * vec3(dx, 0.0);
+    vec3 rayDy = angularBasis * vec3(dy, 0.0);
+    vec3 moonDx=rayDx,moonDy=rayDy;
+    if(u_refraction){
+      // Carry the sky-only pixel offsets through the same exit map.
+      vec3 exitDx=refractionExternal(u_camera_origin,max(u_ray4d_observer_height,0.0),normalize(direction+rayDx));
+      vec3 moonDirectionDx=normalize(u_moon_position-atmosphereBackgroundOrigin);
+      vec3 exitDy=refractionExternal(u_camera_origin,max(u_ray4d_observer_height,0.0),normalize(direction+rayDy));
+      vec3 moonDirectionDy=normalize(u_moon_position-atmosphereBackgroundOrigin);
+      rayDx=exitDx-backgroundDirection;rayDy=exitDy-backgroundDirection;
+      moonDx=rayDx-(moonDirectionDx-backgroundMoonDirection);
+      moonDy=rayDy-(moonDirectionDy-backgroundMoonDirection);
+      atmosphereBackgroundOrigin=backgroundOrigin;
+      atmosphereBackgroundDirection=backgroundDirection;
+    }
+    float pixelSolidAngle = length(cross(rayDx, rayDy));
+    if(pixelSolidAngle<=1e-20)pixelSolidAngle=4.0*angularArea/(u_viewport.x*u_viewport.y);
+    float sunAngle = atan(length(cross(backgroundDirection, u_solar_direction)), dot(backgroundDirection, u_solar_direction));
+    float radius = acos(u_direct_sun_cos_radius);
+    float edge = max(0.5 * (length(rayDx) + length(rayDy)), 1e-7);
+    float sunCoverage = u_disks_enabled ? 1.0 - smoothstep(radius - edge, radius + edge, sunAngle) : 0.0;
+    // Direct solar radiance is added by the fractional-coverage pass. Keep the
+    // disk coverage here only to suppress stars behind the disk.
+    vec3 background = vec3(0);
+    vec3 toMoon = u_moon_position - backgroundOrigin;
+    vec3 moonDirection = backgroundMoonDirection;
     float moonRadius = asin(1737.4 / length(toMoon));
-    float moonSeparation = length(cross(direction, moonDirection));
-    float moonEdge = max(length(rayDx), length(rayDy));
-    float moonCoverage = dot(direction, moonDirection) > 0.0
+    float moonSeparation = length(cross(backgroundDirection, moonDirection));
+    float moonEdge = u_refraction
+      ?max(length(moonDx),length(moonDy)):max(length(rayDx),length(rayDy));
+    float moonCoverage = u_disks_enabled && dot(backgroundDirection, moonDirection) > 0.0
       ? 1.0 - smoothstep(sin(moonRadius) - moonEdge * .5, sin(moonRadius) + moonEdge * .5, moonSeparation) : 0.0;
     if (moonCoverage > 0.0) {
       // Analytic lunar sphere: the visible terminator follows the phase angle;
@@ -949,7 +1248,7 @@ void main() {
         sunTangent = cross(moonDirection, abs(moonDirection.y) < .9 ? vec3(0,1,0) : vec3(1,0,0));
       sunTangent = normalize(sunTangent);
       vec3 side = cross(moonDirection, sunTangent);
-      vec2 disk = vec2(dot(direction, sunTangent), dot(direction, side)) / sin(moonRadius);
+      vec2 disk = vec2(dot(backgroundDirection, sunTangent), dot(backgroundDirection, side)) / sin(moonRadius);
       vec3 lunarNormal = vec3(disk, sqrt(max(0.0, 1.0 - dot(disk, disk))));
       float lit = max(0.0, dot(lunarNormal, vec3(sin(u_moon_phase), 0.0, cos(u_moon_phase))));
       float lambert = (sin(u_moon_phase) + (${Math.PI} - u_moon_phase) * cos(u_moon_phase)) / ${Math.PI};
@@ -958,7 +1257,11 @@ void main() {
       background = mix(background, vec3(moonRadiance * lit / max((2.0 / 3.0) * lambert, 1e-6)), moonCoverage);
     }
     if (u_stars_enabled) {
-      vec3 celestial = u_celestial_rotation * direction;
+      // Local physical sky background, before reception/exposure/artistic gains.
+      // A ray missing the atmosphere has zero background even beside a bright Earth.
+      float skyLuminance = dot(max(scattering * u_sky_strength, vec3(0)), vec3(.2126,.7152,.0722)) * photopicScale();
+      float starGain = darkPreviewGain(u_display_star_gain, skyLuminance, u_display_star_limits.x, u_display_star_limits.y);
+      vec3 celestial = u_celestial_rotation * backgroundDirection;
       // NASA's map is centered at RA 0h, increasing left; its first row is north.
       vec2 uv = vec2(0.5 - atan(celestial.y, celestial.x) / 6.28318530718,
                      0.5 - asin(clamp(celestial.z, -1.0, 1.0)) / 3.14159265359);
@@ -967,340 +1270,196 @@ void main() {
       vec3 du = vec3(celestial.y, -celestial.x, 0.0) / (6.28318530718 * equatorial);
       vec3 dv = vec3(0.0, 0.0, -1.0 / (3.14159265359 * sqrt(equatorial)));
       vec3 dx = u_celestial_rotation * rayDx, dy = u_celestial_rotation * rayDy;
-      vec3 stars = textureGrad(u_milkyway, uv, vec2(dot(du, dx), dot(dv, dx)), vec2(dot(du, dy), dot(dv, dy))).rgb * u_milkyway_scale;
+      vec3 stars = textureGrad(u_milkyway, uv, vec2(dot(du, dx), dot(dv, dx)), vec2(dot(du, dy), dot(dv, dy))).rgb * u_milkyway_scale * starGain;
       // Sparse point sources are deliberately excluded from 16x16 scene metering.
-      if (!u_metering) stars += texelFetch(u_star_points, ivec2(screen), 0).rgb
-        * 1e-12 / max(length(cross(rayDx, rayDy)), 1e-30);
+        vec3 points = texelFetch(u_star_points, ivec2(screen), 0).rgb * 1e-12 / pixelSolidAngle;
+        pointStars = points * u_star_solar_irradiance * starGain * (1.0 - sunCoverage) * (1.0 - moonCoverage) * (1.0 - mapColor.a);
       background += stars * u_star_solar_irradiance * (1.0 - sunCoverage) * (1.0 - moonCoverage);
     }
-    linear += background * (1.0 - mapColor.a);
+    float mediumIndex=u_refraction?1.0+.00029*
+      (exp(-clamp(u_ray4d_observer_height,0.0,100.0)/8.0)-exp(-12.5)):1.0;
+    linear += background * (mediumIndex*mediumIndex) * (1.0 - mapColor.a);
+    pointStars*=mediumIndex*mediumIndex;
   }
-  linear = linear * mix(vec3(1.0), transmission, u_atmosphere_strength) + scattering * u_atmosphere_strength;
-  if (u_metering) {
-    // Empty space is not an underexposed subject, even though it has a valid sky endpoint.
+  // Ground already includes its own geographic path's extinction. Only sky
+  // backgrounds use the screen ray's transmission; do not attenuate ground twice.
+  linear = ground + linear * mix(vec3(1.0), transmission, u_sky_strength)
+    + scattering * (hasSurface ? u_fog_strength : u_sky_strength);
+  // Ideal receiver: fixed reference exposure sets collecting area, uniform directional
+  // acceptance, and a fixed-height virtual sensor. Sensor height = 2 units,
+  // pixel area = 4 / viewportHeight^2. Reference area = 9 units^2 calibrates
+  // the on-axis response to 1 at the default FOV (2*atan(1/3)). Exposure
+  // is controlled by a single EV gain during preview development.
+  // This is not a finite-aperture lens simulation.
+  // A * solidAngle / pixelArea = 9 * angularArea * viewportHeight/viewportWidth.
+  // Apply to ALL transported radiance, before both metering and development.
+  float reception = 9.0 * angularArea * (u_viewport.y / u_viewport.x) * u_photography_gain;
+  linear *= reception;
+  vec3 withoutPoints = linear;
+  linear += pointStars * mix(vec3(1.0), transmission, u_sky_strength) * reception;
+    // Alpha is metering luminance, excluding sparse point sources, not opacity.
+    float meterY = dot(max(withoutPoints, vec3(0)), vec3(.2126,.7152,.0722));
     float cameraHeight = length(u_camera_origin) - 6371.0;
     float t = dot(u_camera_origin, direction);
     float radial = (100.0 - cameraHeight) * (12842.0 + cameraHeight);
-    if (cameraHeight > 100.0 && (t >= 0.0 || t * t + radial < 0.0)) {
-      fragColor = vec4(0.0);
-      return;
-    }
-    float luminance = dot(max(linear, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
-    fragColor = vec4(vec3((clamp(log2(max(luminance, exp2(${EXPOSURE_METER_MIN_LOG.toFixed(1)}))), ${EXPOSURE_METER_MIN_LOG.toFixed(1)}, 4.0) - ${EXPOSURE_METER_MIN_LOG.toFixed(1)}) / ${EXPOSURE_METER_LOG_RANGE.toFixed(1)}), 1.0);
-    return;
+    if (!hasSurface && cameraHeight > 100.0 && (t >= 0.0 || t * t + radial < 0.0))
+      meterY=-1.0;
+    // Display restores sky radiance before metering and development.
+    return vec4(linear, meterY)*(hasSurface?1.0:u_sky_opacity);
+}
+// Never difference the sky ray against an adjacent ground endpoint.
+vec3 skyRayStep(ivec2 pixel,ivec2 axis,vec3 center){
+  ivec2 size=textureSize(u_surface_ray,0);
+  ivec2 hi=min(pixel+axis,size-1),lo=max(pixel-axis,ivec2(0));
+  vec4 a=texelFetch(u_surface_ray,lo,0),b=texelFetch(u_surface_ray,hi,0);
+  bool left=a.z<0.0&&any(notEqual(lo,pixel)),right=b.z<0.0&&any(notEqual(hi,pixel));
+  if(left&&right)return .5*(decodeDirection(b.xy)-decodeDirection(a.xy));
+  if(left)return center-decodeDirection(a.xy);
+  if(right)return decodeDirection(b.xy)-center;
+  return vec3(0);
+}
+void shadeSolarDisk(ivec2 pixel) {
+  if(!u_disks_enabled)discard;
+  vec4 ray=texelFetch(u_surface_ray,pixel,0);
+  if(ray.z>=0.0)discard;
+  vec3 center=decodeDirection(ray.xy);
+  float radius=acos(u_direct_sun_cos_radius);
+  float separation=atan(length(cross(center,u_solar_direction)),dot(center,u_solar_direction));
+  // Conservative bound for this atmosphere's limb deflection plus pixel
+  // footprint. The expensive forward-map evaluations stay near the Sun.
+  vec3 dx=skyRayStep(pixel,ivec2(1,0),center),dy=skyRayStep(pixel,ivec2(0,1),center);
+  if(separation>radius+.04+length(dx)+length(dy))discard;
+  vec3 sum=vec3(0);
+  float hits=0.0,meteredSum=0.0;
+  float h=max(u_ray4d_observer_height,0.0);
+    float mediumIndex=u_refraction?1.0+.00029*
+    (exp(-clamp(h,0.0,100.0)/8.0)-exp(-12.5)):1.0;
+  for(int y=0;y<4;y++)for(int x=0;x<4;x++) {
+    vec2 offset=(vec2(x,y)+.5)/4.0-.5;
+    vec3 direction=normalize(center+dx*offset.x+dy*offset.y);
+    vec3 transmission,unusedScattering;
+    atmosphereRay(u_camera_origin,direction,1e30,true,transmission,unusedScattering);
+    if(u_refraction&&u_sky_strength<=0.0)
+      refractionExternal(u_camera_origin,h,direction);
+    vec3 exterior=atmosphereBackgroundDirection;
+    float angle=atan(length(cross(exterior,u_solar_direction)),dot(exterior,u_solar_direction));
+    if(angle>=radius||all(lessThanEqual(transmission,vec3(0))))continue;
+    vec3 toMoon=u_moon_position-atmosphereBackgroundOrigin;
+    vec3 moon=normalize(toMoon);
+    if(dot(exterior,moon)>0.0&&length(cross(exterior,moon))<1737.4/length(toMoon))continue;
+    vec2 screen=vec2(pixel)+.5+offset;
+    vec2 clip=screen/u_viewport*2.0-1.0;
+    vec3 sensor=vec3(clip*u_sensor_projection.xy+u_sensor_projection.zw,-1);
+    float angularArea=abs(u_sensor_projection.x*u_sensor_projection.y)/pow(length(sensor),3.0);
+    float reception=9.0*angularArea*(u_viewport.y/u_viewport.x)*u_photography_gain;
+    vec3 value=u_direct_solar_radiance*mix(vec3(1),transmission,u_sky_strength)
+      *(mediumIndex*mediumIndex)*reception;
+    sum+=value;hits+=1.0;
+    // Preserve the existing exclusion of empty space from scene metering.
+    float along=dot(u_camera_origin,direction);
+    float radial=(100.0-h)*(12842.0+h);
+    if(h<=100.0||(along<0.0&&along*along+radial>=0.0))
+      meteredSum+=dot(max(value,vec3(0)),vec3(.2126,.7152,.0722));
   }
-  // Whole-layer opacity is applied once, including coverage, sky and the solar disk.
-  vec4 completed = vec4(displayRadiance(linear), 1.0);
-  fragColor = mix(mapColor, completed, clamp(u_opacity, 0.0, 1.0));
+  if(hits==0.0)discard;
+  // Keep small disk fractions in the radiance.
+  // Native ground coverage is applied separately by the shared stencil.
+  fragColor=vec4(sum,meteredSum)*(u_sky_opacity/16.0);
+}
+void main() {
+  vec2 screen=gl_FragCoord.xy;
+  ivec2 pixel=ivec2(screen);
+  if(u_solar_pass) { shadeSolarDisk(pixel); return; }
+  vec4 hit=texelFetch(u_surface_ray,pixel,0);
+  if(u_ground_pass ? hit.z<=0.0 : hit.z>=0.0)discard;
+  vec3 direction=decodeDirection(hit.xy);
+  vec2 dx=vec2(0),dy=vec2(0);
+  if(!u_ground_pass) {
+    mat3 tangent=transpose(skyBasis(direction));
+    vec3 rayDx=skyRayStep(pixel,ivec2(1,0),direction),rayDy=skyRayStep(pixel,ivec2(0,1),direction);
+    dx=(tangent*rayDx).xy;
+    dy=(tangent*rayDy).xy;
+  }
+  fragColor=shadeSurfaceSample(screen,hit,direction,dx,dy);
 }`;
 
-const ATMOSPHERE_MESH_STEPS = 16;
-const ATMOSPHERE_AZIMUTH_STEPS = 64;
-
-/** Project an infinite sky mesh, but store finite physical atmospheric endpoints. */
-class AtmosphereSurface {
-  #program: WebGLProgram;
-  #vertices: WebGLBuffer;
-  #vertexArray: WebGLVertexArrayObject;
-  #indices: WebGLBuffer;
-
-  constructor(gl: WebGL2RenderingContext) {
-    this.#program = createProgram(
-      gl,
-      `#version 300 es
-      precision highp float;
-      in highp vec3 v_direction;
-      uniform vec3 u_camera_origin;
-      layout(location = 0) out vec4 position;
-      layout(location = 1) out vec4 normalHeight;
-      void main() {
-        vec3 direction = normalize(v_direction);
-        float cameraRadius = length(u_camera_origin);
-        float height = cameraRadius - 6371.0;
-        float t = dot(u_camera_origin, direction);
-        float radial = (100.0 - height) * (12842.0 + height);
-        float discriminant = t * t + radial;
-        float root = sqrt(max(0.0, discriminant));
-        float exitDistance = t > 0.0 ? radial / max(t + root, 1e-20) : -t + root;
-        bool crossesAtmosphere = discriminant >= 0.0 && exitDistance > 0.0;
-        // Space directions also need a valid endpoint, but never acquire air density.
-        float spaceDistance = max(1000.0, cameraRadius * 0.1);
-        vec3 endpoint = u_camera_origin + direction * (crossesAtmosphere ? exitDistance : spaceDistance);
-        float radius = length(endpoint);
-        vec3 up = endpoint / radius;
-        // Sky has a direction, but no finite surface at which to stop transport.
-        position = vec4(up, 1e30);
-        normalHeight = vec4(up, crossesAtmosphere ? 100000.0 : (radius - 6371.0) * 1000.0);
-      }`,
-      `#version 300 es
-      precision highp float;
-      layout(location = 0) in vec3 a_clip;
-      layout(location = 1) in vec3 a_direction;
-      out highp vec3 v_direction;
-      void main() {
-        // CPU projection has already taken the infinite-distance limit (w = 0).
-        // Preserve angular coverage without clipping at the map's far plane.
-        gl_Position = vec4(a_clip.xy, 0.0, a_clip.z);
-        v_direction = a_direction;
-      }`,
-    );
-    const vertices = gl.createBuffer();
-    const vertexArray = gl.createVertexArray();
-    const indices = gl.createBuffer();
-    if (!vertices || !vertexArray || !indices) throw new Error('Failed to allocate NightLayer atmosphere mesh');
-    this.#vertices = vertices;
-    this.#vertexArray = vertexArray;
-    this.#indices = indices;
-    gl.bindVertexArray(vertexArray);
-    gl.bindBuffer(gl.ARRAY_BUFFER, vertices);
-    for (let i = 0; i < 2; i++) {
-      gl.enableVertexAttribArray(i);
-      gl.vertexAttribPointer(i, 3, gl.FLOAT, false, 24, i * 12);
-    }
-    const indexData: number[] = [];
-    const steps = ATMOSPHERE_MESH_STEPS;
-    const azimuthSteps = ATMOSPHERE_AZIMUTH_STEPS;
-    for (let y = 0; y < steps; y++)
-      for (let x = 0; x < azimuthSteps; x++) {
-        const a = y * (azimuthSteps + 1) + x;
-        const b = a + 1,
-          c = a + azimuthSteps + 1,
-          d = c + 1;
-        indexData.push(a, b, c, c, b, d);
-      }
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indices);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indexData), gl.STATIC_DRAW);
-  }
-
-  render(map: MaplibreMap, gl: WebGL2RenderingContext, options: CustomRenderMethodInput): void {
-    const projection = options.defaultProjectionData;
-    const transition = Math.max(0, Math.min(1, projection.projectionTransition));
-    const camera = atmosphereCamera(map, options);
-    const { origin } = camera;
-    const centreLongitude = Math.atan2(origin[0], origin[2]);
-    const cameraRadius = Math.hypot(...origin);
-    const cameraUp = origin.map((n) => n / cameraRadius);
-    const east = [Math.cos(centreLongitude), 0, -Math.sin(centreLongitude)];
-    const north = [cameraUp[1] * east[2], cameraUp[2] * east[0] - cameraUp[0] * east[2], -cameraUp[1] * east[0]];
-    const horizontalKilometres = 2 * Math.PI * 6371 * Math.max(Math.hypot(cameraUp[0], cameraUp[2]), 1e-7);
-    const data: number[] = [];
-    const steps = ATMOSPHERE_MESH_STEPS;
-    const physicalDirection = (azimuth: number, elevation: number) =>
-      cameraUp.map(
-        (n, i) =>
-          (east[i] * Math.sin(azimuth) + north[i] * Math.cos(azimuth)) * Math.cos(elevation) + n * Math.sin(elevation),
-      );
-    // Globe surrounds the observer; Mercator has only the upward hemisphere.
-    // Corresponding latitude rows keep the topology fixed through projection morphs.
-    for (let y = 0; y <= steps; y++) {
-      const mercatorElevation = ((y / steps) * Math.PI) / 2;
-      const globeElevation = (y / steps) * Math.PI - Math.PI / 2;
-      for (let x = 0; x <= ATMOSPHERE_AZIMUTH_STEPS; x++) {
-        const azimuth = x === ATMOSPHERE_AZIMUTH_STEPS ? 0 : (x * 2 * Math.PI) / ATMOSPHERE_AZIMUTH_STEPS;
-        const globeDirection = physicalDirection(azimuth, globeElevation);
-        const mercatorDirection = physicalDirection(azimuth, mercatorElevation);
-        const mercator = [
-          (Math.sin(azimuth) * Math.cos(mercatorElevation)) / horizontalKilometres,
-          (-Math.cos(azimuth) * Math.cos(mercatorElevation)) / horizontalKilometres,
-          Math.sin(mercatorElevation) / camera.mercatorKilometres,
-        ];
-        const globe = globeDirection.map((n) => n / 6371);
-        // Project directions with homogeneous w = 0: no altitude, camera
-        // translation, or subtraction of large coordinates is involved.
-        const clip = [0, 1, 3].map((row) => {
-          const multiply = (matrix: ArrayLike<number>, direction: number[]) =>
-            matrix[row] * direction[0] + matrix[4 + row] * direction[1] + matrix[8 + row] * direction[2];
-          return (
-            (transition < 1 ? multiply(projection.fallbackMatrix, mercator) * (1 - transition) : 0) +
-            (transition > 0 ? multiply(projection.mainMatrix, globe) * transition : 0)
-          );
-        });
-        const direction = mercatorDirection.map((n, i) => n + (globeDirection[i] - n) * transition);
-        data.push(...clip, ...direction);
-      }
-    }
-    gl.useProgram(this.#program);
-    gl.bindVertexArray(this.#vertexArray);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.#vertices);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.DYNAMIC_DRAW);
-    gl.uniform3fv(gl.getUniformLocation(this.#program, 'u_camera_origin'), origin);
-    gl.disable(gl.CULL_FACE);
-    gl.disable(gl.BLEND);
-    gl.disable(gl.STENCIL_TEST);
-    gl.disable(gl.DEPTH_TEST);
-    gl.depthMask(false);
-    gl.drawElements(gl.TRIANGLES, steps * ATMOSPHERE_AZIMUTH_STEPS * 6, gl.UNSIGNED_SHORT, 0);
-    // Terrain overwrites the positions; its cleared native depth buffer is untouched.
-    map.painter.context.setDirty();
-  }
-
-  dispose(gl: WebGL2RenderingContext): void {
-    gl.deleteProgram(this.#program);
-    gl.deleteBuffer(this.#vertices);
-    gl.deleteVertexArray(this.#vertexArray);
-    gl.deleteBuffer(this.#indices);
-  }
-}
-
-/** Tile-independent sea level, following the native projection in every mode. */
-class SeaLevelSurface {
-  #program: WebGLProgram;
-  #vertices: WebGLBuffer;
-  #vertexArray: WebGLVertexArrayObject;
-  #sphere = new NativeSurface();
-
-  constructor(gl: WebGL2RenderingContext) {
-    this.#program = createProgram(
-      gl,
-      `#version 300 es
-      precision highp float;
-      in highp vec3 v_ground;
-      uniform vec2 u_mercator_centre;
-      layout(location = 0) out vec4 position;
-      layout(location = 1) out vec4 normalHeight;
-      void main() {
-        vec2 mercator = u_mercator_centre + v_ground.xy / v_ground.z;
-        float longitude = (fract(mercator.x) - 0.5) * ${2 * Math.PI};
-        // Inverse Mercator remains finite even beyond the native latitude strip.
-        // Use a decaying exponential, avoiding sinh overflow toward infinity.
-        float angle = ${Math.PI} * (1.0 - 2.0 * mercator.y);
-        float e = exp(-abs(angle));
-        float latitudeSin = sign(angle) * (1.0 - e * e) / (1.0 + e * e);
-        float latitudeCos = 2.0 * e / (1.0 + e * e);
-        vec3 up = vec3(sin(longitude) * latitudeCos, latitudeSin, cos(longitude) * latitudeCos);
-        // Ground vertices are homogeneous, including points at infinity. Undo
-        // their interpolated world W to recover the finite plane's clip depth.
-        float depth = v_ground.z > 0.0 ? 1.0 / (gl_FragCoord.w * v_ground.z) : 1e30;
-        position = vec4(up, depth);
-        normalHeight = vec4(up, 0.0);
-      }`,
-      `#version 300 es
-      precision highp float;
-      layout(location = 0) in vec3 a_clip;
-      layout(location = 1) in vec3 a_ground;
-      out highp vec3 v_ground;
-      void main() {
-        // The fallback plane must not stop at the native tiles' far clip.
-        gl_Position = vec4(a_clip.xy, 0.0, a_clip.z);
-        v_ground = a_ground;
-      }`,
-    );
-    const vertices = gl.createBuffer();
-    const vertexArray = gl.createVertexArray();
-    if (!vertices || !vertexArray) throw new Error('Failed to allocate NightLayer Mercator ground mesh');
-    this.#vertices = vertices;
-    this.#vertexArray = vertexArray;
-    gl.bindVertexArray(vertexArray);
-    gl.bindBuffer(gl.ARRAY_BUFFER, vertices);
-    for (let i = 0; i < 2; i++) {
-      gl.enableVertexAttribArray(i);
-      gl.vertexAttribPointer(i, 3, gl.FLOAT, false, 24, i * 12);
-    }
-  }
-
-  render(map: MaplibreMap, gl: WebGL2RenderingContext, options: CustomRenderMethodInput): void {
-    const projection = options.defaultProjectionData;
-    const camera = atmosphereCamera(map, options);
-    if (projection.projectionTransition > 0) {
-      // Geographic coverage does not require any loaded source tiles. Reuse the
-      // native world mesh, including its poles and globe-side clipping, at 0 m.
-      const tiles = map.coveringTiles({ tileSize: 512, minzoom: 0, maxzoom: 0 });
-      this.#sphere.render(map, gl, tiles, options, true);
-      return;
-    }
-    const { mercatorPosition } = camera;
-    const [x, y] = mercatorPosition;
-    // Relative homogeneous coordinates preserve precision near the camera.
-    // Homogeneous vertices at infinity extend sea level beyond both latitude
-    // edges without choosing a finite extent. World-copy settings still decide
-    // whether longitude is unbounded or restricted to the original world.
-    const centre = [0, 0, 1];
-    const east = [1, 0, 0],
-      west = [-1, 0, 0];
-    const north = [0, -1, 0],
-      south = [0, 1, 0];
-    const ground = map.getRenderWorldCopies()
-      ? [centre, east, north, centre, north, west, centre, west, south, centre, south, east]
-      : [[-x, 0, 1], [1 - x, 0, 1], north, [-x, 0, 1], south, [1 - x, 0, 1]];
-    const matrix = projection.fallbackMatrix;
-    const data = ground.flatMap(([dx, dy, w]) => {
-      const clip = [0, 1, 3].map(
-        (row) =>
-          (matrix[row] * x + matrix[4 + row] * y + matrix[12 + row]) * w + matrix[row] * dx + matrix[4 + row] * dy,
-      );
-      return [...clip, dx, dy, w];
-    });
-    gl.useProgram(this.#program);
-    gl.bindVertexArray(this.#vertexArray);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.#vertices);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.DYNAMIC_DRAW);
-    gl.uniform2f(gl.getUniformLocation(this.#program, 'u_mercator_centre'), x % 1, y);
-    gl.disable(gl.CULL_FACE);
-    gl.disable(gl.BLEND);
-    gl.disable(gl.STENCIL_TEST);
-    gl.disable(gl.DEPTH_TEST);
-    gl.depthMask(false);
-    gl.drawArrays(gl.TRIANGLES, 0, ground.length);
-    map.painter.context.setDirty();
-  }
-
-  dispose(gl: WebGL2RenderingContext): void {
-    this.#sphere.dispose(gl);
-    gl.deleteProgram(this.#program);
-    gl.deleteBuffer(this.#vertices);
-    gl.deleteVertexArray(this.#vertexArray);
-  }
-}
-
-type Program = ReturnType<MaplibreMap['painter']['programCache']['getProgram']>;
 type Terrain = NonNullable<MaplibreMap['terrain']>;
-type Mesh = ReturnType<Terrain['getTerrainMesh']>;
 type Tile = ReturnType<MaplibreMap['coveringTiles']>[number];
 
+/** Match visible receiver meshes, and fill only their uncovered surroundings.
+ * DEM source IDs are deltaZoom levels below the mesh IDs expected by MapLibre.
+ * Never draw coarse parent terrain over a more detailed receiver or caster.
+ */
+function terrainShadowTiles(visible: Tile[], sources: Tile[], deltaZoom: number): Tile[] {
+  const expand = (tile: Tile, levels: number): Tile[] =>
+    levels === 0 ? [tile] : tile.children(22).flatMap((child) => expand(child, levels - 1));
+  const candidates = [...sources.flatMap((tile) => expand(tile, deltaZoom)), ...visible];
+  const receivers = new Set(visible.map((tile) => tile.key));
+  const roots = new Map(candidates.map((tile) => [tile.scaledTo(0).key, tile.scaledTo(0)]));
+  const visit = (tile: Tile, covered: boolean, descendants: Tile[]): Tile[] => {
+    if (receivers.has(tile.key)) return [tile];
+    covered ||= descendants.some((candidate) => candidate.key === tile.key);
+    const children = descendants.filter((candidate) => candidate.canonical.z > tile.canonical.z);
+    if (children.length === 0) return covered ? [tile] : [];
+    return tile.children(22).flatMap((child) =>
+      visit(
+        child,
+        covered,
+        children.filter((candidate) => candidate.key === child.key || candidate.isChildOf(child)),
+      ),
+    );
+  };
+  return Array.from(roots.values()).flatMap((root) =>
+    visit(
+      root,
+      false,
+      candidates.filter((tile) => tile.key === root.key || tile.isChildOf(root)),
+    ),
+  );
+}
+
 /**
- * MapLibre WebGL adapter. Borrow the native meshes and draw machinery;
- * own only the position-output programs and their VAOs. Tile enumeration stays
+ * MapLibre WebGL adapter. Consume native tile meshes and DEM descriptors;
+ * own the shaders, uniforms and VAOs. Tile enumeration stays
  * with map.coveringTiles({terrain}), outside this adapter.
  */
 class NativeSurface {
   #terrain?: Terrain;
-  #programs = new Map<WebGLProgram, Program>();
-  #segments = new Map<Mesh['segments'], Mesh['segments']>();
+  #programs = new Map<string, TileSurfaceProgram>();
 
-  #createProgram(gl: WebGL2RenderingContext, native: Program, seaLevel: boolean): Program {
-    const shader = gl
-      .getAttachedShaders(native.program)
-      ?.find((shader) => gl.getShaderParameter(shader, gl.SHADER_TYPE) === gl.VERTEX_SHADER);
-    const source = shader && gl.getShaderSource(shader);
-    if (!source || !source.includes('projectTile')) {
-      throw new Error('NightLayer: unsupported MapLibre terrain vertex shader');
-    }
-    // Keep the native height sampling, pole handling, skirts and projection
-    // intact. The wrapper only adds the geographic direction as a varying.
-    const position = source.includes('in vec3 a_pos3d') ? 'a_pos3d.xy' : 'a_pos';
-    const globe = /^#define GLOBE\b/m.test(source);
+  constructor(private readonly shadow = false) {}
+
+  #createProgram(gl: WebGL2RenderingContext, options: CustomRenderMethodInput, terrain: boolean): TileSurfaceProgram {
+    const position = 'a_tile.xy';
+    const globe = /\bGLOBE\b/.test(options.shaderData.define);
     const vertexSource =
-      source.replace(/^(#version[^\n]*\n)/, '$1#define main nightlayerTerrainMain\n') +
+      tileVertexPrelude(options, terrain) +
       `
-      #undef main
+      ${mercatorSphereGLSL}
+      ${relativePositionGLSL}
       uniform vec4 u_nightlayer_tile;
+      ${
+        this.shadow
+          ? `uniform mat4 u_shadow_matrix; uniform vec3 u_shadow_origin;
+      ${shadowVertexGLSL}`
+          : ''
+      }
       out highp vec3 v_nightlayer_direction;
+      out highp vec3 v_nightlayer_delta;
       out highp vec3 v_nightlayer_normal;
       out highp float v_nightlayer_elevation;
-      void main() {
-        nightlayerTerrainMain();
-        ${
-          seaLevel
-            ? `
-        // Globe's Z clips the planet's invisible side and poles during morphing.
-        // Flat sea level instead extends past the native tile far plane.
-        #ifndef GLOBE
-          gl_Position.z = 0.0;
+      vec3 tileDelta(vec2 position) {
+        #ifdef GLOBE
+          if(position.y < -32767.5 || position.y > 32766.5)
+            return localPoleDelta(sign(position.y)*-1.0);
         #endif
-        `
-            : ''
-        }
-        v_nightlayer_elevation = ${source.includes('get_elevation(a_pos3d.xy)') ? `get_elevation(${position}) - (a_pos3d.z == 1.0 ? u_ele_delta : 0.0)` : '0.0'};
+        return localSphereDelta(position,u_nightlayer_tile.zw);
+      }
+      void main() {
+        float elevation=terrainElevation(${position});
+        float skirt=a_tile.z==1.0 ? u_skirt : 0.0;
+        gl_Position=${terrain ? `projectTileFor3D(${position},elevation-skirt)` : `projectTile(${position},${position})`};
+        v_nightlayer_elevation = elevation-skirt;
         #ifdef GLOBE
           v_nightlayer_direction = projectToSphere(${position}, ${position});
         #else
@@ -1308,110 +1467,78 @@ class NativeSurface {
         #endif
         vec2 mercator = u_nightlayer_tile.xy + ${position} * u_nightlayer_tile.zw;
         float longitude = mercator.x * ${2 * Math.PI} + ${Math.PI};
-        float latitude = atan(sinh(${Math.PI} * (1.0 - 2.0 * mercator.y)));
-        vec3 up = vec3(sin(longitude) * cos(latitude), sin(latitude), cos(longitude) * cos(latitude));
+        #ifdef GLOBE
+          // Use the receiver's exact native sphere mapping, including pole
+          // sentinel vertices. Reinterpreting those as Mercator Y bends caps.
+          vec3 up = v_nightlayer_direction;
+        #else
+          vec3 up = mercatorSphere(mercator);
+        #endif
+        float latitudeSin = up.y;
+        float latitudeCos = length(up.xz);
         v_nightlayer_normal = up;
+        v_nightlayer_delta = tileDelta(vec2(${position}));
         ${
-          source.includes('get_elevation(a_pos3d.xy)')
+          this.shadow
             ? `
-        vec2 stepSize = 1.0 / (u_terrain_dim * vec2(u_terrain_matrix[0][0], u_terrain_matrix[1][1]));
+        // Native skirt vertices duplicate the edge XY. At the same elevation
+        // their triangles have zero area; real pole caps keep their own XY.
+        v_nightlayer_elevation = elevation;
+        vec3 light=(u_shadow_matrix * vec4(localEndpoint(v_nightlayer_delta,v_nightlayer_elevation), 1.0)).xyz;
+        gl_Position=shadowPosition(light,elevation*.001);
+        `
+            : ''
+        }
+        ${
+          terrain
+            ? `
+        // Polar cap vertices are native sentinels, not DEM sample positions.
+        // A finite difference across that sentinel samples unrelated clamped
+        // DEM texels and divides by zero meridian width at the pole.
+        if(latitudeCos>1e-6) {
+        vec2 stepSize = 1.0 / (u_dem_size * vec2(u_dem_matrix[0][0], u_dem_matrix[1][1]));
         vec2 heightDelta = vec2(
-          get_elevation(${position} + vec2(stepSize.x, 0.0)) - get_elevation(${position} - vec2(stepSize.x, 0.0)),
-          get_elevation(${position} + vec2(0.0, stepSize.y)) - get_elevation(${position} - vec2(0.0, stepSize.y)));
-        vec2 distance = 2.0 * stepSize * u_nightlayer_tile.zw * ${2 * Math.PI * 6371000} * max(cos(latitude), 0.000001);
+          terrainElevation(${position} + vec2(stepSize.x, 0.0)) - terrainElevation(${position} - vec2(stepSize.x, 0.0)),
+          terrainElevation(${position} + vec2(0.0, stepSize.y)) - terrainElevation(${position} - vec2(0.0, stepSize.y)));
+        vec2 distance = 2.0 * stepSize * u_nightlayer_tile.zw * ${2 * Math.PI * 6371000} * max(latitudeCos, 0.000001);
         vec2 slope = heightDelta / distance;
         vec3 east = vec3(cos(longitude), 0.0, -sin(longitude));
-        vec3 north = vec3(-sin(longitude) * sin(latitude), cos(latitude), -cos(longitude) * sin(latitude));
+        vec3 north = vec3(-sin(longitude) * latitudeSin, latitudeCos, -cos(longitude) * latitudeSin);
         v_nightlayer_normal = normalize(up - slope.x * east + slope.y * north);
+        }
         `
             : ''
         }
       }`;
-    const fragmentSource = `#version 300 es
+    const fragmentSource = this.shadow
+      ? shadowFragment
+      : `#version 300 es
       precision highp float;
+      precision highp int;
+      // Forward endpoint attributes use ordinary perspective interpolation.
       in highp vec3 v_nightlayer_direction;
+      in highp vec3 v_nightlayer_delta;
       in highp vec3 v_nightlayer_normal;
       in highp float v_nightlayer_elevation;
       uniform vec4 u_nightlayer_tile;
-      layout(location = 0) out vec4 fragColor;
-      layout(location = 1) out vec4 normalColor;
+      uniform vec4 u_observer_horizon; // observer up and squared horizon chord
+      layout(location = 0) out vec4 hit;
+      ${inverseLookupGLSL}
+      ${mercatorSphereGLSL}
+      ${relativePositionGLSL}
       void main() {
-        ${
-          globe
-            ? 'vec3 direction = v_nightlayer_direction;'
-            : `
-        // MapLibre's tile scale already includes 1 / EXTENT.
-        vec2 mercator = u_nightlayer_tile.xy + v_nightlayer_direction.xy * u_nightlayer_tile.zw;
-        float longitude = mercator.x * ${2 * Math.PI} + ${Math.PI};
-        float t = exp(${Math.PI} * (1.0 - 2.0 * mercator.y));
-        float latitudeSin = (t * t - 1.0) / (t * t + 1.0);
-        float latitudeCos = 2.0 * t / (t * t + 1.0);
-        vec3 direction = vec3(sin(longitude) * latitudeCos, latitudeSin, cos(longitude) * latitudeCos);`
-        }
-        vec3 up = normalize(direction);
-        fragColor = vec4(up, 1.0 / gl_FragCoord.w);
-        normalColor = vec4(${source.includes('get_elevation(a_pos3d.xy)') ? 'normalize(v_nightlayer_normal)' : 'up'}, v_nightlayer_elevation);
+        // Include native stitch walls as visible receivers so tile gaps use
+        // the same endpoint as the map instead of the background atmosphere.
+        vec3 delta=${globe ? 'localNormalizeDelta(v_nightlayer_delta)' : 'localSphereDelta(v_nightlayer_direction.xy,u_nightlayer_tile.zw)'};
+        // Geographic output and relative ray share one endpoint definition.
+        vec3 up = normalize(u_local_to_world*(u_local_up+delta));
+        vec3 chord = up - u_observer_horizon.xyz;
+        if(u_observer_horizon.w<4.0&&dot(chord,chord)>u_observer_horizon.w)discard;
+        hit=packGroundHit(localEndpoint(delta,v_nightlayer_elevation),
+          ${terrain ? 'normalize(v_nightlayer_normal)' : 'up'},
+          false);
       }`;
-    const program = gl.createProgram();
-    if (!program) throw new Error('NightLayer: failed to allocate native terrain position program');
-    const shaders: WebGLShader[] = [];
-    try {
-      for (const [type, text] of [
-        [gl.VERTEX_SHADER, vertexSource],
-        [gl.FRAGMENT_SHADER, fragmentSource],
-      ] as const) {
-        const shader = gl.createShader(type);
-        if (!shader) throw new Error('NightLayer: failed to allocate native terrain shader');
-        shaders.push(shader);
-        gl.shaderSource(shader, text);
-        gl.compileShader(shader);
-        gl.attachShader(program, shader);
-      }
-      gl.linkProgram(program);
-      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-        throw new Error(
-          shaders.map((shader) => gl.getShaderInfoLog(shader)).join('\n') ||
-            gl.getProgramInfoLog(program) ||
-            'NightLayer: failed to link native terrain position program',
-        );
-      }
-      // Use native block bindings and Program.draw(), so DEM/projection UBOs
-      // are populated by MapLibre itself rather than duplicating their layout.
-      for (let i = 0; i < gl.getProgramParameter(program, gl.ACTIVE_UNIFORM_BLOCKS); i++) {
-        const name = gl.getActiveUniformBlockName(program, i)!;
-        const nativeIndex = gl.getUniformBlockIndex(native.program, name);
-        if (nativeIndex === gl.INVALID_INDEX) throw new Error(`NightLayer: unsupported native uniform block ${name}`);
-        gl.uniformBlockBinding(
-          program,
-          i,
-          gl.getActiveUniformBlockParameter(native.program, nativeIndex, gl.UNIFORM_BLOCK_BINDING),
-        );
-      }
-      const result = Object.create(native) as Program;
-      result.program = program;
-      const float = gl.getUniformLocation(program, 'u_ele_delta');
-      result.fixedUniforms = {};
-      if (native.fixedUniforms.u_ele_delta) {
-        const elevation = Object.create(native.fixedUniforms.u_ele_delta) as (typeof native.fixedUniforms)[string];
-        elevation.set = (value: number) => gl.uniform1f(float, value);
-        result.fixedUniforms.u_ele_delta = elevation;
-      }
-      result.terrainUniforms = { ...native.terrainUniforms };
-      for (const name of ['u_depth', 'u_terrain'] as const) {
-        const location = gl.getUniformLocation(program, name);
-        const uniform = Object.create(native.terrainUniforms[name]) as (typeof native.terrainUniforms)[typeof name];
-        uniform.set = (value: number) => gl.uniform1i(location, value);
-        result.terrainUniforms[name] = uniform;
-      }
-      return result;
-    } catch (error) {
-      gl.deleteProgram(program);
-      throw error;
-    } finally {
-      for (const shader of shaders) {
-        gl.deleteShader(shader);
-      }
-    }
+    return new TileSurfaceProgram(gl, vertexSource, fragmentSource);
   }
 
   render(
@@ -1419,13 +1546,13 @@ class NativeSurface {
     gl: WebGL2RenderingContext,
     tiles: Tile[],
     options: CustomRenderMethodInput,
-    seaLevel = false,
+    shadow?: TerrainShadow,
   ): void {
-    const terrain = seaLevel ? undefined : map.terrain;
+    const terrain = map.terrain;
     const painter = map.painter;
     const projection = map.style.projection;
     if (
-      !painter?.programCache?.getProgram ||
+      !painter?.context ||
       !projection?.getMeshFromTileID ||
       (terrain && (!terrain.getTerrainMesh || !terrain.getTerrainData))
     ) {
@@ -1433,81 +1560,75 @@ class NativeSurface {
     }
     if (this.#terrain && this.#terrain !== terrain) this.dispose(gl);
     this.#terrain = terrain;
-    const native = painter.programCache.getProgram({
-      name: terrain ? 'terrainDepth' : 'clippingMask',
-      projectionShaderVariant: {
-        name: projection.shaderVariantName,
-        define: projection.shaderDefine,
-        prelude: projection.shaderPreludeCode,
-      },
-      showOverdrawInspector: false,
-      useTerrain: !!map.terrain,
-      defines: [],
-    });
-    let program = this.#programs.get(native.program);
+    const key = `${options.shaderData.variantName}/${!!terrain}`;
+    let program = this.#programs.get(key);
     if (!program) {
-      program = this.#createProgram(gl, native, seaLevel);
-      this.#programs.set(native.program, program);
+      program = this.#createProgram(gl, options, !!terrain);
+      this.#programs.set(key, program);
     }
     const context = painter.context;
     context.setDirty();
-    const depth = { func: seaLevel ? gl.ALWAYS : gl.LEQUAL, mask: !seaLevel, range: [0, 1] as [number, number] };
-    const stencil: Parameters<Program['draw']>[3] = {
-      test: { func: gl.ALWAYS, mask: 0 },
-      ref: 0,
-      mask: 0,
-      fail: gl.KEEP,
-      depthFail: gl.KEEP,
-      pass: gl.KEEP,
-    };
-    const colour: Parameters<Program['draw']>[4] = {
-      blendFunction: [gl.ONE, gl.ZERO],
-      blendColor: context.blendColor.get(),
-      mask: [true, true, true, true],
-    };
-    const cull = { enable: true, mode: gl.BACK, frontFace: gl.CCW };
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.depthMask(true);
+    gl.depthRange(0, 1);
+    if (shadow) gl.disable(gl.STENCIL_TEST);
+    else {
+      // Record the same ground hit in the LUT and its receiver stencil.
+      gl.enable(gl.STENCIL_TEST);
+      gl.stencilMask(0xff);
+      gl.stencilFunc(gl.ALWAYS, 1, 0xff);
+      gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+    }
+    gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.BLEND);
+    gl.colorMask(true, true, true, true);
+    if (shadow) gl.disable(gl.CULL_FACE);
+    else {
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+      gl.frontFace(gl.CCW);
+    }
+    const camera = atmosphereCamera(map, options);
+    const globeMesh = /\bGLOBE\b/.test(options.shaderData.define);
+    if (!shadow) {
+      const radius = Math.hypot(...camera.origin);
+      const horizon = groundHorizonChordSquared(
+        radius,
+        atmosphereFade(map.getZoom(), options.defaultProjectionData.projectionTransition),
+      );
+      gl.useProgram(program.program);
+      gl.uniform4f(
+        uniformLocation(gl, program.program, 'u_observer_horizon'),
+        camera.origin[0] / radius,
+        camera.origin[1] / radius,
+        camera.origin[2] / radius,
+        horizon,
+      );
+    }
+    if (shadow) gl.viewport(0, 0, TERRAIN_SHADOW_SIZE, TERRAIN_SHADOW_SIZE);
     for (const tile of tiles) {
       const mesh = terrain
-        ? terrain.getTerrainMesh(tile, options.defaultProjectionData.projectionTransition > 0)
+        ? terrain.getTerrainMesh(tile, globeMesh)
         : projection.getMeshFromTileID(context, tile.canonical, false, true, 'raster');
-      let segments = this.#segments.get(mesh.segments);
-      if (!segments) {
-        segments = Object.create(mesh.segments) as Mesh['segments'];
-        segments.segments = mesh.segments.get().map((segment) => ({ ...segment, vaos: {} }));
-        this.#segments.set(mesh.segments, segments);
-      }
       const data = terrain?.getTerrainData(tile) ?? null;
       const tileProjection = options.getProjectionData({
         tileID: tile,
         applyTerrainMatrix: false,
         applyGlobeMatrix: true,
       });
-      context.program.set(program.program);
-      gl.uniform4fv(gl.getUniformLocation(program.program, 'u_nightlayer_tile'), tileProjection.tileMercatorCoords);
-      program.draw(
-        context,
-        gl.TRIANGLES,
-        depth,
-        stencil,
-        colour,
-        cull,
-        { u_ele_delta: terrain?.getSkirtLength(map.getZoom()) ?? 0 },
-        // Native clipping-mask programs have no terrain block and ignore this argument.
-        data!,
-        tileProjection,
-        'nightlayer-surface',
-        mesh.vertexBuffer,
-        mesh.indexBuffer,
-        segments,
-      );
+      program.bind(gl, tileProjection, data, terrain?.getSkirtLength(map.getZoom()) ?? 0);
+      shadow?.bindProjection(gl, program.program);
+      gl.uniform4fv(uniformLocation(gl, program.program, 'u_nightlayer_tile'), tileProjection.tileMercatorCoords);
+      bindRelativePosition(gl, program.program, tileProjection.tileMercatorCoords, camera.origin);
+      program.draw(gl, mesh);
     }
+    shadow?.finish(gl);
     context.setDirty();
   }
 
   dispose(gl: WebGL2RenderingContext): void {
-    for (const segments of this.#segments.values()) segments.destroy();
-    for (const program of this.#programs.values()) gl.deleteProgram(program.program);
-    this.#segments.clear();
+    for (const program of this.#programs.values()) program.dispose(gl);
     this.#programs.clear();
     this.#terrain = undefined;
   }

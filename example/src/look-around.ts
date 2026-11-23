@@ -13,11 +13,49 @@ type Direction = [number, number, number];
 type DragMode = 'look' | 'move';
 const dot = (a: Direction, b: Direction): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 
+export type CameraView = {
+  observer: [number, number, number]; // longitude, latitude, altitude (metres)
+  pitch: number;
+  bearing: number;
+  roll: number;
+  distance: number; // Mercator coordinate units, not the lens focal distance
+  movementMetersPerPixel: number;
+  heightLimit: number;
+};
+
+/** Validate before changing any map or UI state on LOAD. */
+export function cameraViewSettings(value: unknown): CameraView {
+  const camera = value as CameraView | null;
+  if (
+    !camera ||
+    !Array.isArray(camera.observer) ||
+    camera.observer.length !== 3 ||
+    !camera.observer.every(Number.isFinite) ||
+    Math.abs(camera.observer[1]) > 85.051129 ||
+    ![
+      camera.pitch,
+      camera.bearing,
+      camera.roll,
+      camera.distance,
+      camera.movementMetersPerPixel,
+      camera.heightLimit,
+    ].every(Number.isFinite) ||
+    camera.pitch < 0 ||
+    camera.pitch > 180 ||
+    camera.distance <= 0 ||
+    camera.movementMetersPerPixel <= 0 ||
+    camera.heightLimit <= 0
+  )
+    throw new Error('Invalid camera view');
+  return camera;
+}
+
 export class LookAround implements CustomLayerInterface {
   id = 'look-around-controls';
   type = 'custom' as const;
   #map: Map;
   #onChange: (available: boolean, active: boolean) => void;
+  #onMeasure?: (x: number, y: number) => void;
   #available = false;
   #observer?: MercatorCoordinate;
   #distance = 0;
@@ -33,11 +71,17 @@ export class LookAround implements CustomLayerInterface {
     x: number;
     y: number;
     mode: DragMode;
+    clickStart?: [number, number];
   };
   #velocity = { bearing: 0, pitch: 0, right: 0, forward: 0 };
   #inertiaFrame?: number;
+  #fovFrame?: number;
+  #fovTarget?: number;
+  #touches = new globalThis.Map<number, { x: number; y: number }>();
+  #pinch?: { distance: number; tangent: number };
   #saved?: {
     camera: CameraOptions;
+    fieldOfView: number;
     projection: ProjectionSpecification;
     maxPitch: number;
     clamped: boolean;
@@ -46,14 +90,39 @@ export class LookAround implements CustomLayerInterface {
     handlers: { handler: { enable(): void; disable(): void }; enabled: boolean }[];
   };
 
-  constructor(map: Map, onChange: (available: boolean, active: boolean) => void) {
+  constructor(
+    map: Map,
+    onChange: (available: boolean, active: boolean) => void,
+    onMeasure?: (x: number, y: number) => void,
+  ) {
     this.#map = map;
     this.#onChange = onChange;
+    this.#onMeasure = onMeasure;
   }
 
   // Keep temporary look-around gestures out of the normal map's shared camera state.
   get returnView(): CameraOptions | undefined {
     return this.#saved?.camera;
+  }
+
+  get cameraView(): CameraView | undefined {
+    if (!this.#saved || !this.#observer) return undefined;
+    const location = this.#observer.toLngLat();
+    return {
+      observer: [location.lng, location.lat, this.#observer.toAltitude()],
+      pitch: this.#pitch,
+      bearing: this.#bearing,
+      roll: this.#roll,
+      distance: this.#distance,
+      movementMetersPerPixel: this.#movementMetersPerPixel,
+      heightLimit: this.#heightLimit,
+    };
+  }
+
+  restoreCamera(value: CameraView): void {
+    const camera = cameraViewSettings(value);
+    this.stop();
+    this.#start(camera);
   }
 
   render(_gl: WebGLRenderingContext | WebGL2RenderingContext, options: CustomRenderMethodInput): void {
@@ -70,14 +139,64 @@ export class LookAround implements CustomLayerInterface {
   }
 
   setFieldOfView(value: number): void {
+    if (this.#saved) this.#animateFieldOfView(value, 160);
+    else {
+      this.#stopFovAnimation();
+      this.#applyFieldOfView(value);
+    }
+  }
+
+  /** Resize changes sensor extent, not the lens or observer position. */
+  resizeFieldOfView(value: number, returnFieldOfView?: number): void {
+    const ratio = Math.tan((value * radians) / 2) / Math.tan((this.#map.getVerticalFieldOfView() * radians) / 2);
+    if (this.#saved)
+      this.#saved.fieldOfView =
+        returnFieldOfView ?? (2 * Math.atan(Math.tan((this.#saved.fieldOfView * radians) / 2) * ratio)) / radians;
+    this.#stopFovAnimation();
+    this.#applyFieldOfView(value);
+  }
+
+  #applyFieldOfView(value: number): void {
     this.#map.setVerticalFieldOfView(value);
     // The transform callback runs before the new FOV becomes the map's current
     // FOV. Recalculate the camera afterwards to keep the observer stationary.
     if (this.#saved) this.#map.jumpTo(this.#cameraOptions());
+    if (this.#pointer) this.#pointer.anchor = this.#screenRay(this.#pointer.x, this.#pointer.y);
   }
 
-  #start(): void {
-    if (!this.#available || this.#map.getZoom() < 12) return;
+  #stopFovAnimation(): void {
+    if (this.#fovFrame !== undefined) cancelAnimationFrame(this.#fovFrame);
+    this.#fovFrame = undefined;
+    this.#fovTarget = undefined;
+  }
+
+  #animateFieldOfView(target: number, duration: number): void {
+    this.#stopFovAnimation();
+    const map = this.#map;
+    const start = map.getVerticalFieldOfView();
+    if (start === target) return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      this.#applyFieldOfView(target);
+      return;
+    }
+    const started = performance.now();
+    this.#fovTarget = target;
+    // Interpolate lens magnification logarithmically, as in the FOV control.
+    const from = Math.log(Math.tan((start * radians) / 2));
+    const to = Math.log(Math.tan((target * radians) / 2));
+    const frame = (now: number) => {
+      const progress = Math.min(1, (now - started) / duration);
+      const eased = 1 - (1 - progress) ** 3;
+      this.#applyFieldOfView(progress === 1 ? target : (2 * Math.atan(Math.exp(from + (to - from) * eased))) / radians);
+      this.#fovFrame = progress < 1 ? requestAnimationFrame(frame) : undefined;
+      if (progress === 1) this.#fovTarget = undefined;
+    };
+    this.#fovFrame = requestAnimationFrame(frame);
+  }
+
+  #start(camera?: CameraView): void {
+    if ((!camera && !this.#available) || this.#map.getZoom() < 12) return;
+    this.#stopFovAnimation();
     const map = this.#map;
     map.stop();
     const canvas = map.getCanvas();
@@ -104,6 +223,18 @@ export class LookAround implements CustomLayerInterface {
       (distance * 2 ** (map.getZoom() - 12) * Math.cos(this.#pitch * radians)) /
         this.#observer.meterInMercatorCoordinateUnits(),
     );
+    if (camera) {
+      this.#observer = MercatorCoordinate.fromLngLat(
+        camera.observer.slice(0, 2) as [number, number],
+        camera.observer[2],
+      );
+      this.#pitch = camera.pitch;
+      this.#bearing = camera.bearing;
+      this.#roll = camera.roll;
+      this.#distance = camera.distance;
+      this.#movementMetersPerPixel = camera.movementMetersPerPixel;
+      this.#heightLimit = camera.heightLimit;
+    }
     const handlers = [
       map.dragPan,
       map.dragRotate,
@@ -115,6 +246,7 @@ export class LookAround implements CustomLayerInterface {
       map.touchPitch,
     ];
     this.#saved = {
+      fieldOfView: map.getVerticalFieldOfView(),
       camera: {
         center: map.getCenter(),
         zoom: map.getZoom(),
@@ -242,6 +374,22 @@ export class LookAround implements CustomLayerInterface {
   }
 
   #pointerDown = (event: PointerEvent): void => {
+    if (event.pointerType === 'touch') {
+      if (this.#touches.size >= 2) return;
+      this.#touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (this.#touches.size === 2) {
+        event.preventDefault();
+        this.#stopInertia();
+        this.#map.getCanvas().setPointerCapture(event.pointerId);
+        const [a, b] = [...this.#touches.values()];
+        this.#pinch = {
+          distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+          tangent: Math.tan(((this.#fovTarget ?? this.#map.getVerticalFieldOfView()) * radians) / 2),
+        };
+        this.#pointer = undefined;
+        return;
+      }
+    }
     if (this.#pointer || (event.pointerType === 'mouse' && event.button !== 0 && event.button !== 2)) return;
     event.preventDefault();
     this.#stopInertia();
@@ -256,14 +404,32 @@ export class LookAround implements CustomLayerInterface {
       x: event.clientX,
       y: event.clientY,
       mode: this.#dragMode(event),
+      clickStart: event.button === 0 && !event.shiftKey ? [event.clientX, event.clientY] : undefined,
     };
   };
 
   #pointerMove = (event: PointerEvent): void => {
+    if (this.#touches.has(event.pointerId)) {
+      this.#touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (this.#pinch) {
+        event.preventDefault();
+        const [a, b] = [...this.#touches.values()];
+        const distance = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+        const fov = (2 * Math.atan((this.#pinch.tangent * this.#pinch.distance) / distance)) / radians;
+        this.setFieldOfView(Math.max(0.1, Math.min(100, fov)));
+        return;
+      }
+    }
     const pointer = this.#pointer;
     if (!pointer || pointer.id !== event.pointerId) return;
+    if (
+      pointer.clickStart &&
+      Math.hypot(event.clientX - pointer.clickStart[0], event.clientY - pointer.clickStart[1]) > 4
+    )
+      pointer.clickStart = undefined;
     event.preventDefault();
     const mode = this.#dragMode(event);
+    if (mode !== 'look') pointer.clickStart = undefined;
     if (mode !== pointer.mode) {
       this.#stopInertia();
       pointer.anchor = this.#screenRay(pointer.x, pointer.y);
@@ -290,14 +456,42 @@ export class LookAround implements CustomLayerInterface {
   };
 
   #pointerUp = (event: PointerEvent): void => {
+    const wasPinching = !!this.#pinch;
+    if (this.#touches.delete(event.pointerId) && wasPinching) {
+      this.#pinch = undefined;
+      this.#stopInertia();
+      const canvas = this.#map.getCanvas();
+      const remaining = [...this.#touches.entries()][0];
+      if (remaining) {
+        const [id, point] = remaining;
+        this.#pointer = {
+          id,
+          ...point,
+          time: event.timeStamp,
+          anchor: this.#screenRay(point.x, point.y),
+          mode: 'look',
+        };
+      }
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+      return;
+    }
     if (this.#pointer?.id !== event.pointerId) return;
-    const coast = event.type === 'pointerup' && event.timeStamp - this.#pointer.time < 100;
+    const click =
+      event.type === 'pointerup' &&
+      !event.shiftKey &&
+      this.#pointer.clickStart &&
+      Math.hypot(event.clientX - this.#pointer.clickStart[0], event.clientY - this.#pointer.clickStart[1]) <= 4;
+    const coast = !click && event.type === 'pointerup' && event.timeStamp - this.#pointer.time < 100;
     this.#pointer = undefined;
     const canvas = this.#map.getCanvas();
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
     canvas.style.cursor = 'grab';
     if (coast) this.#startInertia();
     else this.#stopInertia();
+    if (click) {
+      const rect = canvas.getBoundingClientRect();
+      this.#onMeasure?.(event.clientX - rect.left, event.clientY - rect.top);
+    }
   };
 
   #stopInertia(): void {
@@ -359,17 +553,23 @@ export class LookAround implements CustomLayerInterface {
 
   #wheel = (event: WheelEvent): void => {
     event.preventDefault();
+    event.stopPropagation();
     this.#stopInertia();
     const pixels =
       event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? this.#map.getCanvas().clientHeight : 1);
+    if (!event.shiftKey) {
+      const factor = Math.exp(Math.max(-0.5, Math.min(0.5, pixels * 0.002)));
+      const target = this.#fovTarget ?? this.#map.getVerticalFieldOfView();
+      this.setFieldOfView(Math.max(0.1, Math.min(100, target * factor)));
+      return;
+    }
     const observer = this.#observer!;
     const ground = this.#map.queryTerrainElevation(observer.toLngLat()) ?? 0;
     const clearance = Math.max(1, observer.toAltitude() - ground);
     // Scale speed by ground clearance, not FOV: a telephoto lens should not
     // make physical movement impossibly slow. Limit individual wheel jumps.
     const distance = clearance * Math.max(-0.5, Math.min(0.5, -pixels * 0.002));
-    if (event.shiftKey) this.#moveObserver(0, 0, distance);
-    else this.#moveObserver(0, distance * Math.sin(this.#pitch * radians), -distance * Math.cos(this.#pitch * radians));
+    this.#moveObserver(0, 0, distance);
     if (this.#pointer) {
       this.#pointer.anchor = this.#screenRay(this.#pointer.x, this.#pointer.y);
     }
@@ -379,6 +579,7 @@ export class LookAround implements CustomLayerInterface {
   #keyDown = (event: KeyboardEvent): void => {
     if (event.key === 'Escape') {
       event.preventDefault();
+      event.stopPropagation();
       this.stop();
       return;
     }
@@ -395,6 +596,7 @@ export class LookAround implements CustomLayerInterface {
   };
 
   stop(restore = true): void {
+    this.#stopFovAnimation();
     const saved = this.#saved;
     if (!saved) return;
     this.#stopInertia();
@@ -408,6 +610,10 @@ export class LookAround implements CustomLayerInterface {
     canvas.removeEventListener('lostpointercapture', this.#pointerUp);
     canvas.removeEventListener('wheel', this.#wheel);
     canvas.removeEventListener('keydown', this.#keyDown);
+    const touches = [...this.#touches.keys()];
+    this.#touches.clear();
+    this.#pinch = undefined;
+    for (const id of touches) if (canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
     if (this.#pointer && canvas.hasPointerCapture(this.#pointer.id)) canvas.releasePointerCapture(this.#pointer.id);
     this.#pointer = undefined;
     canvas.style.cursor = saved.cursor;
@@ -420,6 +626,7 @@ export class LookAround implements CustomLayerInterface {
       map.setMaxPitch(saved.maxPitch);
       map.setProjection(saved.projection);
       for (const { handler, enabled } of saved.handlers) if (enabled) handler.enable();
+      this.#animateFieldOfView(saved.fieldOfView, 300);
     }
     this.#onChange(this.#available, false);
   }

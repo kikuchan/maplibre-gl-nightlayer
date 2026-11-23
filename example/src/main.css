@@ -1,3 +1,11 @@
+@font-face {
+  font-family: 'Head Up Daisy';
+  src: url('./x14y24pxHeadUpDaisy.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
 :root {
   background: black;
   font-family: 'BIZ UDGothic', system-ui, sans-serif;
@@ -22,15 +30,42 @@ body {
   height: 100%;
 }
 
-.popup {
+#runtime-error {
+  position: fixed;
+  top: calc(var(--safe-top) + 1rem);
+  left: calc(var(--safe-left) + 1rem);
+  right: calc(var(--safe-right) + 1rem);
+  z-index: 10000;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 1rem;
+  border: 1px solid #ff8c8c;
+  border-radius: 8px;
+  background: #360d12f5;
+  color: #fff;
+  font-size: 14px;
+}
+
+#runtime-error pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.popup,
+.settings > button,
+#map .maplibregl-ctrl-group > button {
   background: rgb(10 18 32 / 88%);
   backdrop-filter: blur(12px);
   border: 1px solid rgb(255 255 255 / 18%);
   border-radius: 12px;
   box-shadow: 0 8px 24px rgb(0 0 0 / 20%);
-  padding: 0.5rem;
   color: #f1f5f9;
   box-sizing: border-box;
+}
+
+.popup {
+  padding: 0.5rem;
   z-index: 2;
 }
 
@@ -65,14 +100,19 @@ body {
   left: calc(var(--safe-left) + var(--panel-inset));
   top: calc(var(--safe-top) + var(--panel-inset) + var(--time-panel-height) + 0.5rem);
   z-index: 2;
+
+  > button {
+    cursor: pointer;
+  }
 }
 
-.look-around-toggle {
+.settings > button,
+#map .maplibregl-ctrl-group > button {
   display: grid;
   place-items: center;
   width: 2.75rem;
   height: 2.75rem;
-  cursor: pointer;
+  padding: 0;
 
   &:focus-visible {
     outline: 2px solid #7dd3fc;
@@ -80,8 +120,20 @@ body {
   }
 
   &[aria-pressed='true'] {
+    --toolbar-hover: #214e6e;
+    --toolbar-active: #286183;
     border-color: #7dd3fc;
-    background: #183d59;
+    background-color: #183d59;
+  }
+
+  &:not(:disabled):active {
+    background-color: var(--toolbar-active, #31435b);
+  }
+
+  @media (hover: hover) {
+    &:not(:disabled, :active):hover {
+      background-color: var(--toolbar-hover, #202c3d);
+    }
   }
 
   &:disabled {
@@ -89,61 +141,150 @@ body {
     background: rgb(15 23 42 / 65%);
     box-shadow: none;
     cursor: not-allowed;
-
-    img {
-      opacity: 0.25;
-    }
+    opacity: 0.45;
+    filter: grayscale(1);
   }
 }
 
-.field-of-view {
+.camera-hud {
+  pointer-events: none;
+  font-family: 'Head Up Daisy', monospace;
+  font-synthesis: none;
+  position: fixed;
+  top: calc(var(--safe-top) + var(--panel-inset) + var(--time-panel-height) + 0.5rem);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   align-items: center;
-  gap: 0.5rem;
-  height: 2.75rem;
-  min-width: 0;
-  font-size: 0.75rem;
+  gap: 0.25rem 0.75rem;
+  width: max-content;
+  max-width: calc(100vw - var(--safe-left) - var(--safe-right) - 22rem);
+  color: white;
+  font-size: 1.25rem;
+  font-weight: 400;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  text-shadow:
+    -1px -1px 1px #000,
+    0 -1px 1px #000,
+    1px -1px 1px #000,
+    -1px 0 1px #000,
+    1px 0 1px #000,
+    -1px 1px 1px #000,
+    0 1px 1px #000,
+    1px 1px 1px #000;
 
-  input {
-    width: clamp(2rem, 10vw, 8rem);
-    min-width: 0;
-    touch-action: none;
-    accent-color: #8acfff;
+  &[hidden] {
+    display: none;
   }
 
-  output {
-    min-width: 5ch;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .fov-reset {
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    width: 1.75rem;
-    height: 1.75rem;
-    padding: 0;
-    border: 0;
-    border-radius: 5px;
+  button,
+  select {
+    pointer-events: auto;
+    min-height: 2.75rem;
+    padding: 0.25rem;
+    border: 1px solid transparent;
+    border-radius: 4px;
     background: transparent;
+    color: inherit;
+    font: inherit;
+    text-shadow: inherit;
     cursor: pointer;
 
-    &:hover {
-      background: rgb(255 255 255 / 12%);
+    &:hover,
+    &:focus-visible {
+      background: rgb(0 0 0 / 35%);
+      border-color: rgb(255 255 255 / 65%);
     }
+
+    &:focus-visible {
+      outline: 2px solid #7dd3fc;
+      outline-offset: 2px;
+    }
+  }
+
+  select {
+    appearance: none;
+    text-align: center;
+  }
+
+  option {
+    background: #101b2c;
+    color: white;
+    text-shadow: none;
+  }
+
+  button[aria-pressed='true'] {
+    border-bottom-color: white;
+  }
+
+  button:disabled {
+    opacity: 0.5;
+    cursor: wait;
   }
 }
 
-.settings-toggle {
+.camera-reading {
+  display: flex;
+  align-items: baseline;
+  gap: 0.25rem;
+
+  &[hidden] {
+    display: none;
+  }
+}
+
+.camera-hud .camera-reset {
   display: grid;
   place-items: center;
   width: 2.75rem;
   height: 2.75rem;
-  cursor: pointer;
+  padding: 0;
 
-  &:focus-visible {
-    outline: 2px solid #7dd3fc;
-    outline-offset: 3px;
+  img {
+    display: block;
+    width: 0.7em;
+    height: 1.2em;
+    filter: drop-shadow(-1px -1px 1px #000) drop-shadow(1px 1px 1px #000);
+  }
+}
+
+.camera-exposure-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.camera-exposure {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+
+  input {
+    pointer-events: auto;
+    width: clamp(5rem, 18vw, 16rem);
+    min-height: 2.75rem;
+    margin: 0;
+    accent-color: #7dd3fc;
+    cursor: pointer;
+  }
+
+  output {
+    min-width: 7ch;
+    text-align: right;
+  }
+}
+
+.camera-gamma {
+  input {
+    width: clamp(4rem, 10vw, 8rem);
+  }
+
+  output {
+    min-width: 4ch;
   }
 }
 
@@ -211,13 +352,27 @@ body {
   option {
     background: #101b2c;
   }
-}
 
-.look-around-help {
-  margin: 0;
-  font-size: 0.75rem;
-  line-height: 1.5;
-  color: #b8c7d9;
+  .coordinate-entry {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.5rem;
+
+    label {
+      grid-column: 1 / -1;
+    }
+
+    input {
+      min-width: 0;
+      min-height: 2rem;
+      padding: 0.25rem 0.5rem;
+      border: 1px solid rgb(255 255 255 / 18%);
+      border-radius: 7px;
+      background: rgb(255 255 255 / 9%);
+      color: inherit;
+      font: inherit;
+    }
+  }
 }
 
 #timescope {
@@ -341,45 +496,15 @@ body {
 }
 
 #map .maplibregl-ctrl-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
   margin: 0;
-  padding: 0.5rem;
-  background: rgb(10 18 32 / 88%);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgb(255 255 255 / 18%);
-  border-radius: 12px;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 20%);
-  overflow: hidden;
-
-  button {
-    width: 2rem;
-    height: 2rem;
-    border: none;
-    border-radius: 0;
-    background: transparent;
-  }
-
-  button + button {
-    border-top: 1px solid rgb(255 255 255 / 18%);
-  }
-
-  button:focus-visible {
-    outline: 2px solid #7dd3fc;
-    outline-offset: -3px;
-    box-shadow: none;
-  }
+  background: none;
+  box-shadow: none;
 
   .maplibregl-ctrl-icon {
     filter: brightness(0) invert(1);
-  }
-
-  button:disabled .maplibregl-ctrl-icon {
-    opacity: 0.35;
-  }
-}
-
-@media (hover: hover) {
-  #map .maplibregl-ctrl-group button:not(:disabled):hover {
-    background: rgb(255 255 255 / 16%);
   }
 }
 
@@ -410,6 +535,11 @@ body {
   right: calc(var(--safe-right) + var(--panel-inset));
 }
 
+#map .maplibregl-ctrl-top-right > .maplibregl-ctrl-group + .maplibregl-ctrl-group {
+  clear: right;
+  margin-top: 0.5rem;
+}
+
 .maplibregl-ctrl-bottom-right {
   bottom: calc(var(--safe-bottom) + var(--panel-inset));
   right: calc(var(--safe-right) + var(--panel-inset));
@@ -420,6 +550,20 @@ body {
 }
 
 @media (max-width: 640px) {
+  .camera-hud {
+    top: calc(var(--safe-top) + var(--panel-inset) + var(--time-panel-height) + 3.5rem);
+    left: calc(var(--safe-left) + var(--panel-inset));
+    transform: none;
+    max-width: calc(100vw - var(--safe-left) - var(--safe-right) - 2 * var(--panel-inset) - 3.5rem);
+    gap: 0 0.125rem;
+    font-size: 1rem;
+
+    button,
+    select {
+      padding-inline: 0.125rem;
+    }
+  }
+
   :root {
     --panel-inset: 0.5rem;
     --time-panel-height: calc(7.25rem + 2px);
@@ -476,10 +620,5 @@ body {
     .toggle-switch {
       height: 2.75rem;
     }
-  }
-
-  .maplibregl-ctrl-group button {
-    width: 2.75rem;
-    height: 2.75rem;
   }
 }

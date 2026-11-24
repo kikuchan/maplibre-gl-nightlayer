@@ -7,12 +7,6 @@ export function focalLength(fovDegrees: number, sensorHeightMm = 24): number {
   return sensorHeightMm / (2 * Math.tan((fovDegrees * Math.PI) / 360));
 }
 
-/** Ideal receiver gain at fixed f/4, 1/125 s, ISO 100, relative to a 36 mm
- * lens on a 24 mm-high sensor. Brightness is controlled only by exposure EV. */
-export function receiverGain(fovDegrees: number, sensorHeightMm = 24): number {
-  return (focalLength(fovDegrees, sensorHeightMm) / 36) ** 2 * (24 / sensorHeightMm) ** 2;
-}
-
 const METER_SIZE = 16;
 const SAMPLE_INTERVAL = 250;
 const EXPOSURE_METER_MIN_LOG = -40;

@@ -17,6 +17,22 @@ from lut_optics import SolarGeometry, disk_directions
 
 AMIN, ASPAN = np.arcsinh(-180), np.arcsinh(220) - np.arcsinh(-180)
 R = 6371.0
+SKY_SUPPORT_MIN = 24.239197702372184
+MIE_G = META["mieG"]
+MIE_EXTINCTION = META["observer"]["transmission"]["mieExtinction"]
+MIE_ALBEDO = MODEL["aerosolSingleScatteringAlbedo"]
+AEROSOL = dict(extinction=MIE_EXTINCTION, singleScatteringAlbedo=MIE_ALBEDO, g=MIE_G)
+SPECTRUM_KEY = hashlib.sha256(
+    json.dumps(
+        {key: MODEL[key] for key in ("beta", "weights48", "solarIrradiance48")},
+        sort_keys=True,
+    ).encode()
+).hexdigest()
+
+
+def check_source_model(configuration):
+    if configuration.get("aerosol") != AEROSOL or configuration.get("spectrum") != SPECTRUM_KEY:
+        raise ValueError("Scattering sources do not match the aerosol and spectral model")
 
 
 def spectral_weights():
@@ -205,6 +221,8 @@ def build_sources(args):
         solarDiskSamples=32,
         splitDirect="density-normalized-v2",
         solarMapping="angular-correction-zenith-limit-v2",
+        aerosol=AEROSOL,
+        spectrum=SPECTRUM_KEY,
     )
     manifest = json.dumps(configuration, indent=2) + "\n"
     if (
@@ -229,7 +247,7 @@ def build_sources(args):
             (y * weights[p, :, None, None] * (2 * np.pi / na)).reshape(nm * na, -1).T
         )
     phase_mu, phase_weight = leggauss(512)
-    g = 0.758
+    g = MIE_G
     phase = (
         3
         / (8 * np.pi)
@@ -246,6 +264,8 @@ def build_sources(args):
     )
     ray_eigen = np.where(ell == 0, 1.0, np.where(ell == 2, 0.1, 0.0))
     beta = np.array(MODEL["beta"])
+    if not np.all(beta[:, 1] == MIE_EXTINCTION):
+        raise ValueError("Spectral and runtime Mie extinction disagree")
     ctx = moderngl.create_standalone_context(require=430, backend="egl")
     print("GPU", ctx.info["GL_RENDERER"], flush=True)
     text = SOURCE_SHADER
@@ -289,6 +309,8 @@ def build_sources(args):
         pathCount=args.steps,
         muCount=nm,
         azimuthCount=na,
+        mieG=MIE_G,
+        mieAlbedo=MIE_ALBEDO,
     ).items():
         if key in program:
             program[key] = value
@@ -348,7 +370,7 @@ def build_sources(args):
                     ray_eigen[:, None] * coefficients[:, 0]
                     + np.exp(-height / 1.2 + height / 8)
                     * mie_eigen[:, None]
-                    * coefficients[:, 1]
+                    * (coefficients[:, 1] * MIE_ALBEDO)
                 )
                 scattered = np.matmul(yout, moments * factor)
                 density[p] = np.maximum(scattered.reshape(nb, nf, nv, 3), 0)
@@ -456,6 +478,7 @@ class Integrator:
     def __init__(self, folder="sources-v2"):
         self.folder = HERE / folder
         self.config = json.loads((self.folder / "config.json").read_text())
+        check_source_model(self.config)
         self.counts = tuple(self.config["counts"])
         self.context = moderngl.create_standalone_context(require=430, backend="egl")
         template = SOURCE_SHADER
@@ -628,7 +651,7 @@ def phase_normalize(phys, xyz):
         phys[..., 3]
     )
     pr = 3 / (16 * np.pi) * (1 + cosine * cosine)
-    g = 0.758
+    g = MIE_G
     pm = (
         3
         / (8 * np.pi)
@@ -734,16 +757,21 @@ def design(x, y, counts):
     return sparse.csr_matrix((values, (rows, cols)), shape=(n, nx * ny))
 
 
-def build_palette():
-    args = SimpleNamespace(controls=[24, 8], penalty=1e-05, output="palette.rgba16f")
+def build_palette(sky_only=False):
+    output = "sky-palette.rgba16f" if sky_only else "palette.rgba16f"
+    args = SimpleNamespace(controls=[24, 8], penalty=1e-05, output=output)
     nx, ny = args.controls
     color = META["palette"]["color"]
     blue = META["palette"]["thetaBlue"]
     rng = np.random.default_rng(1411)
     data = [[], []]
+    reference = HERE / ("reference-curved" if sky_only else "reference")
     for p in range(16):
-        with np.load(HERE / "reference" / f"p{p:02d}.npz") as z:
-            xyz = z["xyz"].reshape(-1, 2, 3)
+        with np.load(reference / f"p{p:02d}.npz") as z:
+            xyz = z["xyz"]
+            if sky_only:
+                xyz = xyz[z["nu"] > SKY_SUPPORT_MIN, ..., -1, :, :]
+            xyz = xyz.reshape(-1, 2, 3)
         for sp in range(2):
             q = xyz[:, sp]
             r = np.hypot(q[:, 0], q[:, 2])
@@ -808,6 +836,7 @@ def build_irradiance():
     meta = META
     axis = np.array(MODEL["irradianceAxis"], "f4")
     config = json.loads((HERE / "sources-v2/config.json").read_text())
+    check_source_model(config)
     nh, nb, *_ = config["counts"]
     weights = spectral_weights()
     rgb_weights = weights @ RGB.T
@@ -883,6 +912,7 @@ uniform int mode,first,count,pathCount,muCount,azimuthCount;
 uniform int directSpecies;
 uniform bool initialOrder;
 uniform vec3 betaR,betaM,betaO;
+uniform float mieG,mieAlbedo;
 const float PI=3.141592653589793;
 const float AMIN=-5.886111451;
 const float ASPAN=11.972891;
@@ -937,13 +967,13 @@ vec3 directSource(float h,float mu,float sunElevation,float phi){
     float apparentElevation=asin(clamp(disk.z,-1.0,1.0))+geometry.w;
     vec3 apparent=vec3(cos(apparentElevation)*horizontal,sin(apparentElevation));
     float nu=clamp(dot(view,apparent),-1.0,1.0);
-    float pr=3.0/(16.0*PI)*(1.0+nu*nu),g=.758;
+    float pr=3.0/(16.0*PI)*(1.0+nu*nu),g=mieG;
     float pm=3.0/(8.0*PI)*(1.0-g*g)/(2.0+g*g)*(1.0+nu*nu)/pow(1.0+g*g-2.0*g*nu,1.5);
     vec3 T=exp(-(geometry.x*betaR+geometry.y*betaM+geometry.z*betaO));
     // Sources store radiance/n² and are divided by Rayleigh density.
     vec3 scattering=directSpecies==0?betaR*pr:
-      directSpecies==1?betaM*pm:
-      betaR*pr+exp(-h/1.2+h/8.0)*betaM*pm;
+      directSpecies==1?betaM*mieAlbedo*pm:
+      betaR*pr+exp(-h/1.2+h/8.0)*betaM*mieAlbedo*pm;
     sum+=T*extra.x*scattering/32.0;
   }
   return sum;

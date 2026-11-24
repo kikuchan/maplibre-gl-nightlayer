@@ -9,8 +9,8 @@ from lut_model import HERE, META, RGB
 
 
 class Palette:
-    def __init__(self):
-        self.payload = (HERE / "palette.rgba16f").read_bytes()
+    def __init__(self, filename="palette.rgba16f"):
+        self.payload = (HERE / filename).read_bytes()
         meta = META["palette"]
         self.cache_key = sha256(
             b"theta-rgb-original-column-targets-v1\0"

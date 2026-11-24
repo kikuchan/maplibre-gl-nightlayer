@@ -37,7 +37,6 @@ import { celestialRotation, uploadStarfield, lunarLight, type Starfield } from '
 import { compileProgram, uniformLocation, SurfaceTargets } from './gl.js';
 import {
   focalLength,
-  receiverGain,
   SENSOR_PITCH_MM,
   encodeEXR,
   Receiver,
@@ -764,8 +763,6 @@ export class NightLayer implements CustomLayerInterface {
     );
     gl.uniform1f(uniformLocation(gl, program, 'u_atmosphere_strength'), atmosphere);
     const fov = this.#map!.getVerticalFieldOfView();
-    const sensorHeight = this.#logicalHeight * SENSOR_PITCH_MM;
-    gl.uniform1f(uniformLocation(gl, program, 'u_photography_gain'), receiverGain(fov, sensorHeight));
     gl.uniform1f(uniformLocation(gl, program, 'u_irradiance_height_max'), layout.irradianceHeightMax);
     const axis = this.#irradianceAxis!;
     gl.uniform4f(
@@ -914,7 +911,7 @@ export class NightLayer implements CustomLayerInterface {
         height,
         pixels,
         {
-          model: 'NightLayer ideal linear RGB receiver; normalized, not sensor electrons',
+          model: 'NightLayer normalized linear RGB radiance; uniform response across the image',
           colorSpace: 'linear sRGB / D65',
           exportExposureEV: exposureEV,
           exportExposureMode: capture.exposure,
@@ -925,7 +922,6 @@ export class NightLayer implements CustomLayerInterface {
           sensorPitchMmPerLogicalPixel: SENSOR_PITCH_MM,
           focalLengthMm: focalLength(fov, this.#logicalHeight * SENSOR_PITCH_MM),
           verticalFovDegrees: fov,
-          referenceExposure: 'f/4, 1/125 s, ISO 100 at exposure 0 EV',
           date: date.toISOString(),
           center: [center.lng, center.lat],
           zoom: this.#map!.getZoom(),
@@ -1024,7 +1020,6 @@ uniform float u_sky_opacity;
 uniform float u_irradiance_height_max;
 // First lattice altitude (deg), lattices per degree, lattice count, height rows.
 uniform vec4 u_irradiance_axis;
-uniform float u_photography_gain;
 uniform vec3 u_camera_origin;
 uniform vec4 u_sensor_projection;
 uniform vec2 u_viewport;
@@ -1183,11 +1178,6 @@ vec4 shadeSurfaceSample(vec2 screen,vec4 hit,vec3 direction,vec2 dx,vec2 dy) {
   vec3 mapLinear = vec3(0.0);
   vec4 mapColor = vec4(0.0);
   if (hasSurface && !fallback) mapColor = logicalMapColor(ivec2(screen), mapLinear);
-  vec2 clip = screen / u_viewport * 2.0 - 1.0;
-  // Optical sensor acceptance is a lens property, independent of terrain slope
-  // and map projection. It is not another world-space viewing-direction solve.
-  vec3 sensor = vec3(clip * u_sensor_projection.xy + u_sensor_projection.zw, -1.0);
-  float angularArea = abs(u_sensor_projection.x * u_sensor_projection.y) / pow(length(sensor), 3.0);
   vec3 transmission, scattering;
   if ((hasSurface ? u_fog_strength : u_sky_strength) > 0.0)
     atmosphereRay(u_camera_origin,direction,distance,!hasSurface,transmission,scattering);
@@ -1230,8 +1220,6 @@ vec4 shadeSurfaceSample(vec2 screen,vec4 hit,vec3 direction,vec2 dx,vec2 dy) {
       atmosphereBackgroundOrigin=backgroundOrigin;
       atmosphereBackgroundDirection=backgroundDirection;
     }
-    float pixelSolidAngle = length(cross(rayDx, rayDy));
-    if(pixelSolidAngle<=1e-20)pixelSolidAngle=4.0*angularArea/(u_viewport.x*u_viewport.y);
     float sunAngle = atan(length(cross(backgroundDirection, u_solar_direction)), dot(backgroundDirection, u_solar_direction));
     float radius = acos(u_direct_sun_cos_radius);
     float edge = max(0.5 * (length(rayDx) + length(rayDy)), 1e-7);
@@ -1264,7 +1252,7 @@ vec4 shadeSurfaceSample(vec2 screen,vec4 hit,vec3 direction,vec2 dx,vec2 dy) {
       background = mix(background, vec3(moonRadiance * lit / max((2.0 / 3.0) * lambert, 1e-6)), moonCoverage);
     }
     if (u_stars_enabled) {
-      // Local physical sky background, before reception/exposure/artistic gains.
+      // Local physical sky background, before exposure or artistic gains.
       // A ray missing the atmosphere has zero background even beside a bright Earth.
       float skyLuminance = dot(max(scattering * u_sky_strength, vec3(0)), vec3(.2126,.7152,.0722)) * photopicScale();
       float starGain = darkPreviewGain(u_display_star_gain, skyLuminance, u_display_star_limits.x, u_display_star_limits.y);
@@ -1278,7 +1266,14 @@ vec4 shadeSurfaceSample(vec2 screen,vec4 hit,vec3 direction,vec2 dx,vec2 dy) {
       vec3 dv = vec3(0.0, 0.0, -1.0 / (3.14159265359 * sqrt(equatorial)));
       vec3 dx = u_celestial_rotation * rayDx, dy = u_celestial_rotation * rayDy;
       vec3 stars = textureGrad(u_milkyway, uv, vec2(dot(du, dx), dot(dv, dx)), vec2(dot(du, dy), dot(dv, dy))).rgb * u_milkyway_scale * starGain;
-      // Sparse point sources are deliberately excluded from 16x16 scene metering.
+      // Convert point-source flux to pixel-average radiance, independently of exposure.
+      float pixelSolidAngle = length(cross(rayDx, rayDy));
+      if (pixelSolidAngle <= 1e-20) {
+        vec2 clip = screen / u_viewport * 2.0 - 1.0;
+        vec3 ray = vec3(clip * u_sensor_projection.xy + u_sensor_projection.zw, -1.0);
+        pixelSolidAngle = 4.0 * abs(u_sensor_projection.x * u_sensor_projection.y)
+          / (u_viewport.x * u_viewport.y * pow(length(ray), 3.0));
+      }
         vec3 points = texelFetch(u_star_points, ivec2(screen), 0).rgb * 1e-12 / pixelSolidAngle;
         pointStars = points * u_star_solar_irradiance * starGain * (1.0 - sunCoverage) * (1.0 - moonCoverage) * (1.0 - mapColor.a);
       background += stars * u_star_solar_irradiance * (1.0 - sunCoverage) * (1.0 - moonCoverage);
@@ -1292,18 +1287,9 @@ vec4 shadeSurfaceSample(vec2 screen,vec4 hit,vec3 direction,vec2 dx,vec2 dy) {
   // backgrounds use the screen ray's transmission; do not attenuate ground twice.
   linear = ground + linear * mix(vec3(1.0), transmission, u_sky_strength)
     + scattering * (hasSurface ? u_fog_strength : u_sky_strength);
-  // Ideal receiver: fixed reference exposure sets collecting area, uniform directional
-  // acceptance, and a fixed-height virtual sensor. Sensor height = 2 units,
-  // pixel area = 4 / viewportHeight^2. Reference area = 9 units^2 calibrates
-  // the on-axis response to 1 at the default FOV (2*atan(1/3)). Exposure
-  // is controlled by a single EV gain during preview development.
-  // This is not a finite-aperture lens simulation.
-  // A * solidAngle / pixelArea = 9 * angularArea * viewportHeight/viewportWidth.
-  // Apply to ALL transported radiance, before both metering and development.
-  float reception = 9.0 * angularArea * (u_viewport.y / u_viewport.x) * u_photography_gain;
-  linear *= reception;
+  // Preserve radiance across the image; preview development controls exposure.
   vec3 withoutPoints = linear;
-  linear += pointStars * mix(vec3(1.0), transmission, u_sky_strength) * reception;
+  linear += pointStars * mix(vec3(1.0), transmission, u_sky_strength);
     // Alpha is metering luminance, excluding sparse point sources, not opacity.
     float meterY = dot(max(withoutPoints, vec3(0)), vec3(.2126,.7152,.0722));
     float cameraHeight = length(u_camera_origin) - 6371.0;
@@ -1354,13 +1340,8 @@ void shadeSolarDisk(ivec2 pixel) {
     vec3 toMoon=u_moon_position-atmosphereBackgroundOrigin;
     vec3 moon=normalize(toMoon);
     if(dot(exterior,moon)>0.0&&length(cross(exterior,moon))<1737.4/length(toMoon))continue;
-    vec2 screen=vec2(pixel)+.5+offset;
-    vec2 clip=screen/u_viewport*2.0-1.0;
-    vec3 sensor=vec3(clip*u_sensor_projection.xy+u_sensor_projection.zw,-1);
-    float angularArea=abs(u_sensor_projection.x*u_sensor_projection.y)/pow(length(sensor),3.0);
-    float reception=9.0*angularArea*(u_viewport.y/u_viewport.x)*u_photography_gain;
     vec3 value=u_direct_solar_radiance*mix(vec3(1),transmission,u_sky_strength)
-      *(mediumIndex*mediumIndex)*reception;
+      *(mediumIndex*mediumIndex);
     sum+=value;hits+=1.0;
     // Preserve the existing exclusion of empty space from scene metering.
     float along=dot(u_camera_origin,direction);

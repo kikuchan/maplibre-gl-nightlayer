@@ -80,31 +80,24 @@ def build_optics():
     build_celestial()
 
 
-def pack_archive(output):
+def pack_sky(palette, configuration):
     import numpy as np
     from scipy.interpolate import PchipInterpolator
-    from lut_model import BLUE, HERE, META
-    from lut_optics import top_shell_limit
-    from lut_palette import Palette
+    from lut_model import BLUE, HERE
+    from lut_scattering import SKY_SUPPORT_MIN, check_source_model
 
-    meta = copy.deepcopy(META)
-    configuration = json.loads((HERE / "sources-v2/config.json").read_text())
+    check_source_model(configuration)
     source_configuration = json.dumps(configuration, sort_keys=True)
-    from lut_pca import MIE_RADIUS_FIT, RADIUS_FIT, packed_factors
-
-    palette = Palette()
-    finite, mie_pair, layout = packed_factors(palette)
-    meta["scattering"].update(layout)
     planes = []
     for p in range(16):
-        reference = HERE / "reference" / f"p{p:02d}.npz"
+        reference = HERE / "reference-curved" / f"p{p:02d}.npz"
         with np.load(reference) as z:
             if str(z["sourceConfig"]) != source_configuration:
                 raise ValueError(f"Scattering source/reference mismatch at height {p}")
             xyz, nu = z["xyz"][..., -1, :, :], z["nu"]
         order = np.argsort(nu)
         nu, xyz = nu[order], xyz[order]
-        use = nu > 24.239197702372184
+        use = nu > SKY_SUPPORT_MIN
         x, values = nu[use] / 63, xyz[use]
         radius = np.hypot(values[..., 0], values[..., 2])
         angle = BLUE - np.arctan2(values[..., 2], values[..., 0])
@@ -132,6 +125,22 @@ def pack_archive(output):
     sky = np.stack(planes).astype("<f2")
     if not np.isfinite(sky).all():
         raise ArithmeticError("Nonfinite packed scattering values")
+    return sky
+
+
+def pack_archive(output):
+    import numpy as np
+    from lut_model import HERE, META
+    from lut_optics import top_shell_limit
+    from lut_palette import Palette
+    from lut_pca import MIE_RADIUS_FIT, RADIUS_FIT, packed_factors
+
+    meta = copy.deepcopy(META)
+    configuration = json.loads((HERE / "sources-v2/config.json").read_text())
+    palette = Palette()
+    finite, mie_pair, layout = packed_factors(palette)
+    meta["scattering"].update(layout)
+    sky = pack_sky(palette, configuration)
     # Keep the cached physical atlas untouched; apply the presentation limit once.
     physical = top_shell_limit(np.load(HERE / "refraction-runtime.npy"))
     irradiance = np.load(HERE / "irradiance.npy")
@@ -162,6 +171,50 @@ def pack_archive(output):
         "transmittance.rgba32f": (HERE / "transmittance.rgba32f").read_bytes(),
         "refraction.rgba32f": physical.astype("<f4").tobytes(),
     }
+    write_archive(output, entries)
+
+
+def pack_sky_preview(output, base):
+    """Mixed-model archive for sky comparisons only; never ship it as the LUT."""
+    import numpy as np
+    from lut_model import HERE, META
+    from lut_palette import Palette
+    from lut_scattering import AEROSOL, build_irradiance, build_palette
+
+    configuration = json.loads((HERE / "sources-v2/config.json").read_text())
+    with zipfile.ZipFile(base) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    meta = json.loads(entries["metadata.json"])
+    if meta["palette"] != META["palette"]:
+        raise ValueError("Sky preview and base must use the same palette layout")
+    build_palette(sky_only=True)
+    palette = Palette("sky-palette.rgba16f")
+    sky = pack_sky(palette, configuration)
+    build_irradiance()
+    irradiance = np.load(HERE / "irradiance.npy")
+    zenith = np.array(
+        [np.interp(90, irradiance[0, :, 0], irradiance[0, :, i]) for i in range(1, 4)]
+    )
+    meta["skyReference"] = float(zenith @ [0.2126, 0.7152, 0.0722])
+    meta["mieG"] = AEROSOL["g"]
+    meta["observer"]["transmission"]["mieExtinction"] = AEROSOL["extinction"]
+    meta["generation"]["skyPreview"] = dict(
+        sourceConfiguration=configuration,
+        finiteScattering="Unchanged from base archive; not valid with the preview palette and optics",
+    )
+    entries.update(
+        {
+            "metadata.json": json.dumps(meta, indent=2).encode(),
+            "sky-scattering.f16": sky.tobytes(),
+            "palette.rgba16f": palette.payload,
+            "irradiance.f32": irradiance.astype("<f4").tobytes(),
+            "transmittance.rgba32f": (HERE / "transmittance.rgba32f").read_bytes(),
+        }
+    )
+    write_archive(output, entries)
+
+
+def write_archive(output, entries):
     output.parent.mkdir(parents=True, exist_ok=True)
     pending = output.with_suffix(".pending.zip")
     with zipfile.ZipFile(
@@ -186,6 +239,7 @@ def main():
         type=Path,
         default=ROOT / "src/atmosphere-lut.zip",
     )
+    parser.add_argument("--base-archive", type=Path, help="Base LUT for --stage sky-preview")
     parser.add_argument(
         "--threads", type=int, default=8, help="CPU threads for the tensor fits"
     )
@@ -197,6 +251,8 @@ def main():
             "optics",
             "sources",
             "references",
+            "sky-references",
+            "sky-preview",
             "pca",
             "palette",
             "pack",
@@ -207,6 +263,14 @@ def main():
     args = parser.parse_args()
     if args.threads < 1:
         parser.error("--threads must be positive")
+    if args.stage == "sky-preview":
+        if args.base_archive is None:
+            parser.error("--stage sky-preview requires --base-archive")
+        if args.output.resolve() in (
+            args.base_archive.resolve(),
+            (ROOT / "src/atmosphere-lut.zip").resolve(),
+        ):
+            parser.error("Sky preview requires a separate --output")
     work = args.work_dir.resolve()
     work.mkdir(parents=True, exist_ok=True)
     os.environ["NIGHTLAYER_LUT_WORKDIR"] = str(work)
@@ -252,6 +316,10 @@ def main():
         "pca": pca,
         "pack": lambda: pack_archive(args.output.resolve()),
     }
+    if args.stage == "sky-references":
+        stages[args.stage] = scattering.build_curved_references
+    if args.stage == "sky-preview":
+        stages[args.stage] = lambda: pack_sky_preview(args.output.resolve(), args.base_archive)
     for name, run in stages.items():
         if args.stage not in ["all", name]:
             continue
